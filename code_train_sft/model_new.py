@@ -18,7 +18,7 @@ from typing import List, Optional
 # 1. 投影器：将分子特征映射到LLM空间
 # ============================
 class QueryAttentionProjector(nn.Module):
-    def __init__(self, input_dim=768, num_queries=8, output_dim=4096, num_heads=8):
+    def __init__(self, input_dim=768, num_queries=128, output_dim=2560, num_heads=8):
         """
         简化版本的查询注意力投影器（包含必要的归一化）
         修改：支持处理5维分子特征 [B, num_molecules, 1, L_mol, input_dim]
@@ -123,6 +123,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         # ---- 1. 加载预训练的Qwen LLM ----
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
+        self.config._name_or_path = qwen_model_name
+
         
         # 添加分子特殊标记
         self.extra_tokens = ["<mol_start>", "<mol_end>"]
@@ -134,6 +136,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             torch_dtype=torch.float32,  # 使用半精度浮点数
             device_map="auto"           # 自动设备映射
         )
+        # self.model.config._name_or_path == qwen_model_name
         
         # 调整词表大小以包含新添加的特殊标记
         self.model.resize_token_embeddings(len(self.tokenizer))
@@ -192,7 +195,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             # 编码SMILES字符串为分子特征
             # 编码器输出形状为 [B, num_molecules, 1, L_mol, d_mol]
             mol_emb = self.mol_encoder.encode(
-                smiles_list, return_torch=True
+                smiles_list, return_torch=True,max_len=1
             ).to(device)  # [B, num_molecules, 1, L_mol, d_mol]
             
             print(f"分子编码器输出形状: {mol_emb.shape}")
@@ -361,6 +364,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         temperature: float = 0.7,
         top_p: float = 0.9,
         do_sample: bool = True,
+        **kwargs,   # ⭐ 必须有
     ):
         """
         生成方法，支持处理多个分子的特征
@@ -388,8 +392,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         with torch.no_grad():
             # 编码SMILES字符串为分子特征
             mol_emb = self.mol_encoder.encode(
-                smiles_list, return_torch=True
-            ).to(device)  # [B, num_molecules, 1, L_mol, d_mol]
+                smiles_list, return_torch=True,max_len=1).to(device)  # [B, num_molecules, 1, L_mol, d_mol]
             
             # 投影到LLM空间
             mol_embeds = self.projector(mol_emb)  # [B, num_molecules, num_queries, d_llm]

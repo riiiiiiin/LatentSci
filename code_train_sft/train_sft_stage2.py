@@ -9,6 +9,7 @@ import logging
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
 import wandb  # 新增：导入wandb
 
+
 # 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ class LoraTrainingMonitorCallback(TrainerCallback):
 # 内存优化的collate_fn
 def collate_fn(
     batch,
-    smiles_len=130*5,           # 4 smiles + 2 special tokens
+    smiles_len=130*1,           # 4 smiles + 2 special tokens
     pad_token_id=0,
     label_pad_id=-100,
 ):
@@ -89,11 +90,14 @@ def collate_fn(
     input_ids = []
     attention_mask = []
     labels = []
+    # smiles_len =130* max((len(x) for x in batch), default=0)
 
     for x in batch:
         ids = x["input_ids"]
         mask = x["attention_mask"]
         lab = x["labels"]
+        
+
 
         pad_len = max_len - len(ids)
 
@@ -107,6 +111,7 @@ def collate_fn(
             lab  +                         # answer labels
             [label_pad_id] * pad_len         # padding
         )
+    
 
     return {
         "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -619,7 +624,7 @@ def test_lora_inference(
     tokenizer,
     test_smiles=[["CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl"]],
     test_prompts=["Modify the molecule CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl by adding a carboxyl."],
-    max_new_tokens=200,
+    max_new_tokens=1024,
     temperature=0.7,
     top_p=0.9,
     device="cuda" if torch.cuda.is_available() else "cpu"
@@ -650,7 +655,7 @@ def test_lora_inference(
                 prompt,
                 padding=True,
                 truncation=True,
-                max_length=256,
+                max_length=2048,
                 return_tensors="pt"
             )
             
@@ -674,18 +679,20 @@ def test_lora_inference(
                     temperature=temperature,
                     top_p=top_p,
                     do_sample=True,
+      
                 )
             
             # 解码结果
+            print(generated_ids)
             generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            print(generated_text)
+            print("generate_text:",generated_text)
             
             # 提取生成的回答
             # if generated_text.startswith(prompt):
             #     answer = generated_text[len(prompt):].strip()
             # else:
             #     answer = generated_text
-            answer=generated_text[len(prompt)+66*5:].strip()
+            answer=generated_text[len(prompt)+130:].strip()
             
             logger.info(f"Generated response: {answer}")
             results.append({
