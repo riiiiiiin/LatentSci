@@ -1,4 +1,4 @@
-name: vllm
+name: biolatent
 channels:
   - https://conda.anaconda.org/pytorch
   - pytorch
