@@ -8,19 +8,17 @@ import torch
 import os
 from datasets import load_dataset
 from transformers import AutoTokenizer
+from config import ModelConfig
 
 # --------------------------------
 # Load tokenizer (Qwen decoder-only LM)
 # --------------------------------
-# 使用相对路径加载 Qwen 模型的 tokenizer
-current_dir = os.path.dirname(os.path.abspath(__file__))
-qwen_path = os.path.abspath(os.path.join(current_dir, "../models/Qwen3-8B-Base"))
-
-tokenizer = AutoTokenizer.from_pretrained(qwen_path)
+# 使用配置文件中的路径加载 Qwen 模型的 tokenizer
+tokenizer = AutoTokenizer.from_pretrained(ModelConfig.DEFAULT_QWEN_PATH)
 tokenizer.pad_token = tokenizer.eos_token
 
-# 最大文本长度（prompt + answer）
-MAX_LEN = 128
+# 最大文本长度（prompt + answer），从配置中读取
+MAX_LEN = ModelConfig.MAX_TEXT_LEN
 
 
 # --------------------------------
@@ -80,12 +78,12 @@ def llm_tokenize(example):
     # prompt 与 answer 用 eos_token 分隔
     full_text = prompt + tokenizer.eos_token + answer
 
-    # 对完整文本进行 tokenization
+    # 对完整文本进行 tokenization，不再使用固定长度 Padding
     enc = tokenizer(
         full_text,
-        truncation=True,              # 超长截断
-        padding="max_length",         # padding 到 MAX_LEN
-        max_length=MAX_LEN,
+        truncation=True,
+        padding=False,      # 🚨 改为 False：不再在这里浪费计算资源补零
+        max_length=MAX_LEN, # 仅保留最大长度限制
     )
 
     input_ids = enc["input_ids"]
@@ -99,6 +97,7 @@ def llm_tokenize(example):
     prompt_ids = tokenizer(
         prompt + tokenizer.eos_token,
         truncation=True,
+        padding=False,      # 🚨 改为 False
         max_length=MAX_LEN,
     )["input_ids"]
 
@@ -106,9 +105,6 @@ def llm_tokenize(example):
 
     # 将 prompt 部分的 label mask 掉（不计算 loss）
     labels[:prompt_len] = [-100] * prompt_len
-
-    # debug：打印当前样本的 SMILES（注意：数据量大时应删除）
-    print(example["input_smiles"])
 
     return {
         # LLM 的输入 token
@@ -136,9 +132,6 @@ def load_data(path):
     # 加载 HuggingFace datasets 格式的数据，使用传入的 path
     ds = load_dataset(path)["train"]
 
-    print("Raw dataset example:")
-    # print(ds[0])  # 可用于调试原始格式
-
     # --------------------------------
     # Step 1: 提取结构化字段
     # --------------------------------
@@ -147,9 +140,6 @@ def load_data(path):
         batched=False,
         remove_columns=ds.column_names  # 移除原始无关字段
     )
-
-    # print("After extract_fields:")
-    # print(dataset[0])
 
     # --------------------------------
     # Step 2: 构造 LLM 训练样本
@@ -164,11 +154,12 @@ def load_data(path):
 
 
 # --------------------------------
-# 4. 运行示例
+# 4. 运行示例 (仅在直接运行该脚本时执行)
 # --------------------------------
 if __name__ == "__main__":
-    dataset_path = os.path.abspath(os.path.join(current_dir, "../ChemCotDataset"))
-    dataset = load_data(dataset_path)
+    # 使用配置文件中的默认路径
+    dataset = load_data(ModelConfig.DEFAULT_DATA_PATH)
 
     print("Final tokenized dataset example:")
-    print(dataset[0])
+    if len(dataset) > 0:
+        print(dataset[0])

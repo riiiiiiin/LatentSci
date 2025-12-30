@@ -335,7 +335,7 @@ class Net(nn.Module):
 
 class MoLEncoder(nn.Module):
 
-    def __init__(self, config, n_vocab, eval=False):
+    def __init__(self, config, n_vocab):
         super(MoLEncoder, self).__init__()
 
         # embeddings
@@ -354,13 +354,27 @@ class MoLEncoder(nn.Module):
             # unless we do deterministic_eval here, we will have random outputs
             feature_map=partial(GeneralizedRandomFeatures, 
                                 n_dims=config['num_feats'], 
-                                deterministic_eval=eval),
+                                deterministic_eval=True),
             activation='gelu'
         )
         self.blocks = builder.get()
 
         # classification
         self.lang_model = LangLayer(config['n_embd'], n_vocab)
+
+    def forward(self, idx, mask):
+        # transformer encoder
+        x = self.tok_emb(idx) # each index maps to a (learnable) vector
+        x = self.drop(x)
+        x = self.blocks(x, length_mask=LengthMask(mask.sum(-1), max_len=idx.shape[1]))
+
+        # add padding
+        token_embeddings = x
+        input_mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        mask_embeddings = (token_embeddings * input_mask_expanded)
+        token_embeddings = F.pad(mask_embeddings, pad=(0, 0, 0, self.config['max_len'] - mask_embeddings.shape[1]), value=0)
+
+        return token_embeddings
 
 
 class MoLDecoder(nn.Module):
@@ -378,7 +392,7 @@ class MoLDecoder(nn.Module):
 class Smi_ted(nn.Module):
     """materials.smi-ted-Light 289M Parameters"""
 
-    def __init__(self, tokenizer, config=None, eval=False):
+    def __init__(self, tokenizer, config=None):
         super(Smi_ted, self).__init__()
 
         # configuration
@@ -390,11 +404,11 @@ class Smi_ted(nn.Module):
 
         # instantiate modules
         if self.config:
-            self.encoder = MoLEncoder(self.config, self.n_vocab, eval=eval)
+            self.encoder = MoLEncoder(self.config, self.n_vocab)
             self.decoder = MoLDecoder(self.n_vocab, self.config['max_len'], self.config['n_embd'])
             self.net = Net(self.config['n_embd'], n_output=self.config['n_output'], dropout=self.config['d_dropout'])
-    
-    def load_checkpoint(self, ckpt_path, n_output, eval=False):
+        
+    def load_checkpoint(self, ckpt_path):
         # load checkpoint file
         checkpoint = torch.load(ckpt_path, map_location=torch.device('cpu'))
 
@@ -405,9 +419,9 @@ class Smi_ted(nn.Module):
         self._set_seed(self.config['seed'])
 
         # instantiate modules
-        self.encoder = MoLEncoder(self.config, self.n_vocab, eval=eval)
+        self.encoder = MoLEncoder(self.config, self.n_vocab)
         self.decoder = MoLDecoder(self.n_vocab, self.max_len, self.n_embd)
-        self.net = Net(self.n_embd, n_output=self.config['n_output'] if 'n_output' in self.config else n_output, dropout=self.config['d_dropout'])
+        self.net = Net(self.n_embd, n_output=self.config['n_output'] if 'n_output' in self.config else 1, dropout=self.config['d_dropout'])
 
         # load weights
         if 'state_dict' in checkpoint:
@@ -434,15 +448,6 @@ class Smi_ted(nn.Module):
                 else:
                     print('unrecognized state')
 
-    def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=0.02)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
     def _set_seed(self, value):
         print('Random Seed:', value)
         random.seed(value)
@@ -452,7 +457,132 @@ class Smi_ted(nn.Module):
         np.random.seed(value)
         cudnn.deterministic = True
         cudnn.benchmark = False
+
+    def forward(self, smiles, batch_size=100):
+        return self.decode(self.encode(smiles, batch_size=batch_size, return_torch=True))
             
+    
+    def extract_all(self, smiles):
+        """Extract all elements from each part of smi-ted. Be careful."""
+        # evaluation mode
+        self.encoder.eval()
+        self.decoder.eval()
+        if self.is_cuda_available:
+            self.encoder.cuda()
+            self.decoder.cuda()
+
+        # handle single str or a list of str
+        smiles = pd.Series(smiles) if isinstance(smiles, str) else pd.Series(list(smiles))
+        smiles = smiles.apply(normalize_smiles)
+        
+        # tokenizer
+        idx, mask = self.tokenize(smiles.to_list())
+        
+        ###########
+        # Encoder #
+        ###########
+        # encoder forward
+        x = self.encoder.tok_emb(idx) # each index maps to a (learnable) vector
+        x = self.encoder.drop(x)
+        x = self.encoder.blocks(x, length_mask=LengthMask(mask.sum(-1)))
+
+        # mean pooling
+        token_embeddings = x
+        input_mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        true_set = sum_embeddings / sum_mask # DO NOT USE THIS FOR DOWNSTREAM TASKS, USE `pred_set` INSTEAD
+
+        # add padding
+        mask_embeddings = (token_embeddings * input_mask_expanded)
+        token_embeddings = F.pad(mask_embeddings, pad=(0, 0, 0, self.max_len - mask_embeddings.shape[1]), value=0)
+        idx = F.pad(idx, pad=(0, self.max_len - idx.shape[1], 0, 0), value=2)
+
+        true_ids = idx
+        true_cte = token_embeddings
+        true_cte = true_cte.view(-1, self.max_len*self.n_embd)
+
+        ###########
+        # Decoder #
+        ###########
+        # CTE autoencoder
+        pred_set = self.decoder.autoencoder.encoder(true_cte)
+        pred_cte = self.decoder.autoencoder.decoder(pred_set)
+
+        # reconstruct tokens
+        pred_ids = self.decoder.lang_model(pred_cte.view(-1, self.max_len, self.n_embd))
+        pred_ids = torch.argmax(pred_ids, axis=-1)
+        
+        return ((true_ids, pred_ids), # tokens
+               (true_cte, pred_cte),  # token embeddings
+               (true_set, pred_set))  # smiles embeddings
+
+
+    
+    def encode(self, smiles_list, batch_size=100, return_torch=True,max_len=3):
+        """Extract efficiently SMILES embeddings for nested SMILES lists.
+        
+        Args:
+            smiles_list: List of lists of SMILES strings, e.g., [[smile1,smile2],[smile1]]
+        
+        Returns:
+            Tensor of shape (B, 3, 202, 768) where B is batch size
+        """
+        # 确保模型在正确的设备上
+        device = next(self.encoder.parameters()).device
+        
+        # 设置为评估模式
+        self.encoder.eval()
+        self.decoder.eval()
+        
+        # Handle nested lists
+        if not isinstance(smiles_list[0], list):
+            smiles_list = [smiles_list]
+        
+        max_smiles_per_sample = max_len  # Maximum number of SMILES per sample
+        
+        # Process each sample (each inner list)
+        all_token_embeddings = []
+        
+        with torch.no_grad():  # 禁用梯度计算
+            for sample_smiles in smiles_list:
+                # If sample has fewer than 3 SMILES, pad with empty strings
+                padded_smiles = sample_smiles + [''] * (max_smiles_per_sample - len(sample_smiles))
+                
+                # Process all SMILES in this sample
+                sample_token_embeddings = []
+                
+                for smiles in padded_smiles:
+                    if smiles and smiles.strip():  # Non-empty SMILES
+                        # Tokenize
+                        idx, mask = self.tokenize([smiles])
+                        
+                        # 确保输入数据在正确的设备上
+                        idx = idx.to(device)
+                        mask = mask.to(device)
+                        
+                        # Get embeddings
+                        token_emb = self.encoder(idx, mask)
+                    else:  # Empty SMILES (padding)
+                        # Create zero embeddings with correct shape
+                        token_emb = torch.zeros(1, self.max_len, self.n_embd, device=device)
+                    
+                    # 将结果添加到列表中
+                    sample_token_embeddings.append(token_emb)
+                
+                # Stack token embeddings for this sample: (3, max_len, n_embd)
+                sample_token_embeddings = torch.stack(sample_token_embeddings, dim=0)
+                all_token_embeddings.append(sample_token_embeddings.cpu())  # 移到CPU
+        
+        # Stack all samples: (B, 3, max_len, n_embd)
+        token_embeddings_tensor = torch.stack(all_token_embeddings, dim=0)
+        
+        if return_torch:
+            return token_embeddings_tensor
+        else:
+            return token_embeddings_tensor.numpy()
+
+
     def tokenize(self, smiles):
         """Tokenize a string into tokens."""
         if isinstance(smiles, str):
@@ -469,82 +599,35 @@ class Smi_ted(nn.Module):
             max_length=self.max_len,
         )
         
-        idx = tokens['input_ids'].clone().detach()
-        mask = tokens['attention_mask'].clone().detach()
-
-        if self.is_cuda_available:
-            return idx.cuda(), mask.cuda()
+        idx = tokens['input_ids']
+        mask = tokens['attention_mask']
         
         return idx, mask
 
-    def extract_embeddings(self, smiles):
-        """提取 Batch 中每个 SMILES 的真实 Token Embeddings (去 Padding)"""
-        # 自动识别设备
-        device = next(self.encoder.parameters()).device
-        self.encoder.eval()
 
-        # tokenizer
-        idx, mask = self.tokenize(smiles)
-        idx = idx.to(device)
-        mask = mask.to(device)
+    def encode_nested_smiles(self, nested_smiles_list):
+        """High-level method to encode nested SMILES lists.
         
-        # transformer encoder
-        x = self.encoder.tok_emb(idx) # each index maps to a (learnable) vector
-        x = self.encoder.drop(x)
-        x = self.encoder.blocks(x, length_mask=LengthMask(mask.sum(-1), max_len=idx.shape[1]))
-
-        # 根据 mask 提取非 Padding 部分
-        results = []
-        # mask 形状: (Batch, Max_Batch_Len)
-        for i in range(len(smiles)):
-            real_len = mask[i].sum().item()
-            # 提取该分子的真实 Token 向量并存入列表
-            results.append(x[i, :real_len, :])
-            
-        return results
-
-    def encode(self, smiles_list):
+        Args:
+            nested_smiles_list: List of lists of SMILES, e.g., [[smile1,smile2],[smile1]]
+        
+        Returns:
+            Tensor of shape (B, 3, 202, 768)
         """
-        处理嵌套列表: [[s1, s2], [s3]] 
-        1. Flatten 为 [s1, s2, s3]
-        2. 批量调用 extract_embeddings
-        3. 重新组装回 [[emb1, emb2], [emb3]]
-        """
-        if not smiles_list:
-            return []
-
-        # 1. Flatten 并记录结构
-        flat_smiles = []
-        structure = [] # 记录每组分子的数量
-        for item in smiles_list:
-            flat_smiles.extend(item)
-            structure.append(len(item))
-
-        # 2. 批量提取 (利用 GPU 并行能力)
-        all_embeddings = self.extract_embeddings(flat_smiles)
-
-        # 3. 还原嵌套结构
-        nested_results = []
-        cursor = 0
-        for count in structure:
-            nested_results.append(all_embeddings[cursor : cursor + count])
-            cursor += count
-
-        return nested_results
+        return self.encode(nested_smiles_list, return_torch=True)
 
     def __str__(self):
         return 'smi-ted-Light'
-
+    
 
 def load_smi_ted(folder="./smi_ted_light", 
               ckpt_filename="smi-ted-Light_40.pt",
-              vocab_filename="bert_vocab_curated.txt",
-              n_output=1,
-              eval=False
+              vocab_filename="bert_vocab_curated.txt"
               ):
     tokenizer = MolTranBertTokenizer(os.path.join(folder, vocab_filename))
     model = Smi_ted(tokenizer)
-    model.load_checkpoint(os.path.join(folder, ckpt_filename), n_output, eval=eval)
+    model.load_checkpoint(os.path.join(folder, ckpt_filename))
+    model.eval()
     print('Vocab size:', len(tokenizer.vocab))
-    print(f'[FINETUNE MODE - {str(model)}]')
+    print(f'[INFERENCE MODE - {str(model)}]')
     return model

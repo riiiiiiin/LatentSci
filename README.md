@@ -52,7 +52,7 @@ cd code_train_sft
 
 python xiufu.py
 
-🧠 Model Download
+🧠 Model Download (under dir BioLatentCOT)
 
 Download pretrained model from Hugging Face
 
