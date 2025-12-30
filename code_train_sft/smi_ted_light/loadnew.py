@@ -21,9 +21,9 @@ import pandas as pd
 
 # Chemistry
 from rdkit import Chem
-from rdkit.Chem import PandasTools
-from rdkit.Chem import Descriptors
-PandasTools.RenderImagesInAllDataFrames(True)
+# from rdkit.Chem import PandasTools
+# from rdkit.Chem import Descriptors
+# PandasTools.RenderImagesInAllDataFrames(True)
 
 # Standard library
 from functools import partial
