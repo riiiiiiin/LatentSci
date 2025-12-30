@@ -191,8 +191,8 @@ def load_trained_components(
 
 # LoRA SFT训练函数 - 支持继续训练
 def train_sft_lora(
-    model_name="/zengdaojian/zhangjia/BioLatent/Qwen4B",
-    data_path="/zengdaojian/zhangjia/BioLatent/ChemCotDataset/chemcotbench-cot",
+    model_name=None,
+    data_path=None,
     output_dir="./qwen3_mol_sft_lora_results",
     epochs=3,
     batch_size=32,
@@ -208,6 +208,11 @@ def train_sft_lora(
     """
     使用LoRA进行SFT训练，支持从预训练权重继续训练
     """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if model_name is None:
+        model_name = os.path.abspath(os.path.join(current_dir, "../models/Qwen3-8B-Base"))
+    if data_path is None:
+        data_path = os.path.abspath(os.path.join(current_dir, "../ChemCotDataset/chemcotbench-cot"))
     logger.info("=" * 60)
     logger.info("LoRA SFT Training for Qwen3MoleculeLLM")
     logger.info(f"Resume from: {resume_from_checkpoint or 'scratch'}")
@@ -557,7 +562,7 @@ def train_sft_lora(
 
 # 加载LoRA模型进行推理
 def load_lora_model_for_inference(
-    base_model_path="/zengdaojian/zhangjia/BioLatent/Qwen4B",
+    base_model_path=None,
     lora_weights_path="./qwen3_mol_sft_lora_results/lora_weights",
     projector_path="./qwen3_mol_sft_lora_results/projector.pt",
     merge_lora=True,
@@ -566,6 +571,9 @@ def load_lora_model_for_inference(
     """
     加载LoRA微调的模型进行推理 - 修复设备一致性
     """
+    if base_model_path is None:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        base_model_path = os.path.abspath(os.path.join(current_dir, "../models/Qwen3-8B-Base"))
     logger.info(f"Loading LoRA model for inference on {device}...")
     
     # 1. 加载基础模型
@@ -837,8 +845,13 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="LoRA微调多模态分子-语言模型")
     parser.add_argument("--mode", type=str, choices=["train", "inference", "continue"], default="train", help="运行模式")
-    parser.add_argument("--model_path", type=str, default="./qwen3_4B_without_128_cot_new_rnx_mol_sft_lora_results_stage2", help="模型路径")
-    parser.add_argument("--data_path", type=str, default="/zengdaojian/zhangjia/BioLatent/ChemCotDataset/chemcotbench-cot", help="数据路径")
+    parser.add_argument("--model_path", type=str, default="./qwen3_mol_sft_lora_results", help="保存/加载模型的路径")
+    
+    # 动态获取默认数据路径
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    default_data_path = os.path.abspath(os.path.join(current_dir, "../ChemCotDataset/chemcotbench-cot"))
+    
+    parser.add_argument("--data_path", type=str, default=default_data_path, help="数据路径")
     parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
     parser.add_argument("--max_seq_length", type=int, default=512, help="最大序列长度")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")

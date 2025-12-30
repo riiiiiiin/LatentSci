@@ -5,17 +5,18 @@
 import json
 import re
 import torch
+import os
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
 # --------------------------------
 # Load tokenizer (Qwen decoder-only LM)
 # --------------------------------
-# 使用 Qwen4B 的 tokenizer
-# 对于 decoder-only 模型，通常将 pad_token 设置为 eos_token
-tokenizer = AutoTokenizer.from_pretrained(
-    "/zengdaojian/zhangjia/BioLatent/Qwen4B"
-)
+# 使用相对路径加载 Qwen 模型的 tokenizer
+current_dir = os.path.dirname(os.path.abspath(__file__))
+qwen_path = os.path.abspath(os.path.join(current_dir, "../models/Qwen3-8B-Base"))
+
+tokenizer = AutoTokenizer.from_pretrained(qwen_path)
 tokenizer.pad_token = tokenizer.eos_token
 
 # 最大文本长度（prompt + answer）
@@ -132,8 +133,8 @@ def load_data(path):
     3. 将文本转为 LLM 可训练的 token 格式
     """
 
-    # 加载 HuggingFace datasets 格式的数据
-    ds = load_dataset("/zengdaojian/zhangjia/BioLatent/ChemCotDataset")["train"]
+    # 加载 HuggingFace datasets 格式的数据，使用传入的 path
+    ds = load_dataset(path)["train"]
 
     print("Raw dataset example:")
     # print(ds[0])  # 可用于调试原始格式
@@ -165,7 +166,9 @@ def load_data(path):
 # --------------------------------
 # 4. 运行示例
 # --------------------------------
-dataset = load_data("/zengdaojian/zhangjia/BioLatent/ChemCotDataset/chemcotbench-cot")
+if __name__ == "__main__":
+    dataset_path = os.path.abspath(os.path.join(current_dir, "../ChemCotDataset"))
+    dataset = load_data(dataset_path)
 
-print("Final tokenized dataset example:")
-print(dataset[0])
+    print("Final tokenized dataset example:")
+    print(dataset[0])

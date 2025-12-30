@@ -3,7 +3,12 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import sys
-sys.path.append('/zengdaojian/zhangjia/BioLatent/smi-ted/smi-ted/inference')
+import os
+
+# 动态添加路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
 from smi_ted_light.loadnew import load_smi_ted
 import torch.nn.functional as F
 from transformers.generation.utils import GenerationConfig
@@ -108,7 +113,7 @@ class QueryAttentionProjector(nn.Module):
 # ============================
 class Qwen3MoleculeLLM(PreTrainedModel):
     def __init__(self, 
-                 qwen_model_name="/zengdaojian/zhangjia/BioLatent/Qwen4B",
+                 qwen_model_name=None,
                  d_mol=202*768):  # d_mol参数保留用于兼容性，实际未使用
         """
         分子-文本多模态大语言模型
@@ -117,6 +122,11 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             qwen_model_name: Qwen基础模型路径
             d_mol: 分子特征维度（兼容性参数）
         """
+        if qwen_model_name is None:
+            # 默认使用项目根目录下的模型
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            qwen_model_name = os.path.abspath(os.path.join(current_dir, "../models/Qwen3-8B-Base"))
+
         # 加载Qwen模型的配置文件
         config = PretrainedConfig.from_pretrained(qwen_model_name)
         super().__init__(config)
@@ -151,9 +161,13 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         # ---- 2. 分子编码器和投影器 ----
         # 加载预训练的分子编码器（SMI-TED）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        smi_ted_folder = os.path.abspath(os.path.join(current_dir, "../models/smi-ted"))
+        smi_ted_ckpt_filename = "smi-ted-Light_40.pt"
+        
         self.mol_encoder = load_smi_ted(
-            folder='/zengdaojian/zhangjia/BioLatent/smi-ted/smi-ted/inference/smi_ted_light',
-            ckpt_filename='/zengdaojian/zhangjia/BioLatent/smi-ted/smi-ted-Light_40.pt'
+            folder=smi_ted_folder,
+            ckpt_filename=smi_ted_ckpt_filename
         )
         
         # 初始化投影器
