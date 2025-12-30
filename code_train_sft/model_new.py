@@ -23,7 +23,7 @@ from typing import List, Optional
 # 1. 投影器：将分子特征映射到LLM空间
 # ============================
 class QueryAttentionProjector(nn.Module):
-    def __init__(self, input_dim=768, num_queries=128, output_dim=2560, num_heads=8):
+    def __init__(self, input_dim=768, num_queries=128, output_dim=4096, num_heads=8):
         """
         简化版本的查询注意力投影器（包含必要的归一化）
         修改：支持处理5维分子特征 [B, num_molecules, 1, L_mol, input_dim]

@@ -74,6 +74,8 @@ python train_sft_stage2.py \
   --max_seq_length 512 \
   --epochs 3
 
+CUDA_VISIBLE_DEVICES=0 python train_sft_stage2.py --mode train --data_path ../ChemCotDataset/chemcotbench-cot --model_path ./qwen3_mol_sft_lora_results --batch_size 2 --max_seq_length 512 --epochs 3
+
 python train_sft_stage2.py   --mode train   --data_path ../ChemCotDataset/chemcotbench-cot   --model_path ./qwen3_mol_sft_lora_results   --batch_size 2   --max_seq_length 512   --epochs 3
 
 
