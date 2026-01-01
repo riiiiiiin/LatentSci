@@ -64,17 +64,12 @@ huggingface-cli download --resume-download ibm-research/materials.smi-ted --loca
 
 🏋️ Training sft
 
-注意要将model_new.py中QueryAttentionProjector输出的维度，与train中collate_fn维度对齐，collate_fn为（QueryAttentionProjector输出的维度+2）*1
-
-python train_sft_stage2.py \
-  --mode train \
-  --data_path chemcotbench-cot \
-  --model_path ./qwen3_mol_sft_lora_results \
-  --batch_size 2 \
-  --max_seq_length 512 \
-  --epochs 3
-
 CUDA_VISIBLE_DEVICES=0 python train_sft_stage2.py --mode train --data_path ../ChemCotDataset/chemcotbench-cot --model_path ./qwen3_mol_sft_lora_results --batch_size 2 --max_seq_length 512 --epochs 3
+
+accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
+  --mode train \
+  --batch_size 2 \
+  --epochs 3
 
 python train_sft_stage2.py   --mode train   --data_path ../ChemCotDataset/chemcotbench-cot   --model_path ./qwen3_mol_sft_lora_results   --batch_size 2   --max_seq_length 512   --epochs 3
 

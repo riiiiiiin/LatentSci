@@ -13,7 +13,7 @@ class ModelConfig:
     SMILES_LEN = NUM_QUERIES + 2 
     
     # --- 数据加载参数 (Data Loading) ---
-    MAX_TEXT_LEN = 512   # 文本部分的最大长度 (dataloader.py 中使用)
+    MAX_TEXT_LEN = 8192   # 文本部分的最大长度 (dataloader.py 中使用)
     
     # --- 默认路径 (Default Paths) ---
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))

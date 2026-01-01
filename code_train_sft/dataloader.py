@@ -161,67 +161,69 @@ def extract_fields(example):
 # --------------------------------
 # 2. 构造 Causal LM 的训练样本
 # --------------------------------
-def llm_tokenize(example):
+def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
     """
     构造 Causal Language Model 的训练格式：
-
-        [PROMPT] <eos> [ANSWER]
-
-    训练目标：
-        - 只在 ANSWER 部分计算 loss
-        - PROMPT 部分的 label 设为 -100
+    使用分别 Tokenize 再拼接的方法，确保 Label 对齐绝对精确。
     """
 
     prompt = example["query"]
-    answer = example["label"]
+    cot = example.get("cot", "")
+    label = example["label"]
 
-    # prompt 与 answer 用 eos_token 分隔
-    full_text = prompt + tokenizer.eos_token + answer
-
-    # 对完整文本进行 tokenization，不再使用固定长度 Padding
-    enc = tokenizer(
-        full_text,
+    # 根据参数决定是否包含 CoT
+    if include_cot and cot:
+        response = f"{cot}\n\n{label}"
+    else:
+        response = label
+    
+    # 1. Tokenize Prompt 部分 (包括分隔符)
+    prompt_enc = tokenizer(
+        f"{prompt}\n\n",
         truncation=True,
-        padding=False,      # 🚨 改为 False：不再在这里浪费计算资源补零
-        max_length=MAX_LEN, # 仅保留最大长度限制
+        padding=False,
+        max_length=max_len,
+        add_special_tokens=False # 避免重复添加 bos_token
+    )
+    
+    # 2. Tokenize Response 部分 (包括结束符)
+    response_enc = tokenizer(
+        f"{response}{tokenizer.eos_token}",
+        truncation=True,
+        padding=False,
+        max_length=max_len,
+        add_special_tokens=False
     )
 
-    input_ids = enc["input_ids"]
-    attention_mask = enc["attention_mask"]
+    prompt_ids = prompt_enc["input_ids"]
+    response_ids = response_enc["input_ids"]
+
+    # 拼接并截断到 max_len
+    input_ids = (prompt_ids + response_ids)[:max_len]
+    attention_mask = (prompt_enc["attention_mask"] + response_enc["attention_mask"])[:max_len]
 
     # -------- 构造 labels --------
     # 初始 labels 与 input_ids 相同
     labels = input_ids.copy()
 
-    # 单独对 prompt + eos 进行 tokenize，用来确定 prompt 的 token 长度
-    prompt_ids = tokenizer(
-        prompt + tokenizer.eos_token,
-        truncation=True,
-        padding=False,      # 🚨 改为 False
-        max_length=MAX_LEN,
-    )["input_ids"]
+    # 精确计算 prompt 长度（考虑截断情况）
+    actual_prompt_len = min(len(prompt_ids), max_len)
 
-    prompt_len = len(prompt_ids)
-
-    # 将 prompt 部分的 label mask 掉（不计算 loss）
-    labels[:prompt_len] = [-100] * prompt_len
+    # 将 prompt 部分的 label mask 掉
+    labels[:actual_prompt_len] = [-100] * actual_prompt_len
 
     return {
-        # LLM 的输入 token
         "input_ids": input_ids,
-        # attention mask
         "attention_mask": attention_mask,
-        # Causal LM 的监督信号（prompt 部分为 -100）
         "labels": labels,
-        # 分子 SMILES（供 Qwen3MoleculeLLM 的 forward 使用）
-        "smiles": example["input_smiles"],
+        "smiles": example["input_smiles"],  # Fixed: changed from example["smiles"] to example["input_smiles"]
     }
 
 
 # --------------------------------
 # 3. 数据集加载与整体处理流程
 # --------------------------------
-def load_data(path):
+def load_data(path, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
     """
     完整的数据加载流程：
     1. 加载原始 ChemCot 数据集
@@ -255,7 +257,8 @@ def load_data(path):
     dataset = dataset.map(
         llm_tokenize,
         batched=False,
-        remove_columns=["query", "label", "input_smiles"]
+        fn_kwargs={"include_cot": include_cot, "max_len": max_len},
+        remove_columns=["query", "input_smiles", "label", "cot"]  # Remove all text fields, keep only tokenized output
     )
 
     return dataset

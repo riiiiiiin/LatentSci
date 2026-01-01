@@ -1,14 +1,17 @@
+import torch
+import torch.nn as nn
 from trl import SFTTrainer, SFTConfig
-from transformers import AutoTokenizer, TrainerCallback
+from transformers import AutoTokenizer, TrainerCallback, DataCollatorForSeq2Seq
 from dataloader import load_data
 from model_new import Qwen3MoleculeLLM
-import torch
 import os
-from config import ModelConfig
-from typing import Dict, List, Any
+import time
+import json
 import logging
+import wandb
+from config import ModelConfig
+from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
-import wandb  # 新增：导入wandb
 
 
 # 设置日志
@@ -17,22 +20,15 @@ logger = logging.getLogger(__name__)
 
 # 自定义回调函数，用于监控训练过程
 class LoraTrainingMonitorCallback(TrainerCallback):
-    """LoRA训练监控回调函数"""
+    """LoRA训练监控回调函数：仅负责打印关键信息，不重复记录 wandb"""
     
     def on_log(self, args, state, control, logs=None, **kwargs):
-        """记录训练日志到wandb"""
+        """同时打印日志到控制台"""
         if logs:
-            # 记录到wandb
-            if wandb.run is not None:
-                wandb.log(logs, step=state.global_step)
-            
-            # 同时打印到控制台
             if 'loss' in logs:
                 logger.info(f"Step {state.global_step}: loss = {logs['loss']:.4f}")
             if 'learning_rate' in logs:
-                logger.info(f"Step {state.global_step}: learning rate = {logs['learning_rate']:.6f}")
-            if 'grad_norm' in logs:
-                logger.info(f"Step {state.global_step}: grad norm = {logs['grad_norm']:.4f}")
+                logger.info(f"Step {state.global_step}: lr = {logs['learning_rate']:.6f}")
     
     def on_train_begin(self, args, state, control, **kwargs):
         """训练开始时记录LoRA参数信息"""
@@ -79,51 +75,23 @@ class LoraTrainingMonitorCallback(TrainerCallback):
         if wandb.run is not None:
             wandb.log({"epoch": state.epoch})
 
-# 内存优化的collate_fn工厂函数
-def get_collate_fn(num_queries):
+# 工业级多模态数据整理器
+class MultiModalDataCollator(DataCollatorForSeq2Seq):
     """
-    根据 num_queries 动态生成对齐的 collate_fn
+    继承自 DataCollatorForSeq2Seq，支持自动文本补齐和 Label 掩码，
+    同时兼容自定义的 smiles 字段。
     """
-    smiles_len = num_queries + 2 # 自动计算对齐长度 (queries + start + end)
-    
-    def collate_fn(
-        batch,
-        pad_token_id=0,
-        label_pad_id=-100,
-    ):
-        max_len = max(len(x["input_ids"]) for x in batch)
-
-        input_ids = []
-        attention_mask = []
-        labels = []
-
-        for x in batch:
-            ids = x["input_ids"]
-            mask = x["attention_mask"]
-            lab = x["labels"]
-            
-            pad_len = max_len - len(ids)
-
-            # text
-            input_ids.append(ids + [pad_token_id] * pad_len)
-            attention_mask.append(mask + [label_pad_id] * pad_len)
-
-            # 🚨 关键：labels 对齐 logits
-            # 这里的 smiles_len 使用的是外部闭包中的变量
-            labels.append(
-                [label_pad_id] * smiles_len +   # smiles + special tokens
-                lab  +                         # answer labels
-                [label_pad_id] * pad_len         # padding
-            )
+    def __call__(self, features):
+        # 1. 提取并移除不支持的 smiles 字段
+        smiles = [f.pop("smiles") for f in features]
         
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "smiles": [[x["smiles"].replace(".", "")] for x in batch],
-        }
-    
-    return collate_fn
+        # 2. 调用父类的 __call__ 进行标准补齐
+        # 它会自动将 input_ids 补齐到 pad_token_id，将 labels 补齐到 -100
+        batch = super().__call__(features)
+        
+        # 3. 放回 smiles 字段
+        batch["smiles"] = smiles
+        return batch
 
 # 加载已训练的模型组件
 def load_trained_components(
@@ -133,64 +101,36 @@ def load_trained_components(
     device=None
 ):
     """
-    加载已训练的组件到模型
+    加载已训练的组件到模型。
+    取消所有 fallback 策略，加载失败即报错，确保训练基点正确。
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 加载LoRA权重（如果存在）
-    if lora_weights_path and os.path.exists(lora_weights_path):
-        logger.info(f"Loading pre-trained LoRA weights from: {lora_weights_path}")
-        
-        # 检查是否是PeftModel（已包含LoRA权重）
-        if hasattr(model.model, 'peft_config'):
-            # 如果已经是PeftModel，使用from_pretrained加载适配器
-            try:
-                # 先加载配置
-                peft_config = PeftConfig.from_pretrained(lora_weights_path)
-                logger.info(f"Loaded LoRA config: r={peft_config.r}, alpha={peft_config.lora_alpha}")
-                
-                # 使用PeftModel加载权重
-                model.model = PeftModel.from_pretrained(
-                    model.model, 
-                    lora_weights_path,
-                    is_trainable=True  # 确保权重可训练
-                )
-                logger.info("Successfully loaded LoRA weights")
-            except Exception as e:
-                logger.warning(f"Failed to load LoRA weights as PeftModel: {e}")
-                # 尝试其他加载方式
-                try:
-                    # 尝试直接加载状态字典
-                    adapter_weights = torch.load(
-                        os.path.join(lora_weights_path, "adapter_model.bin"),
-                        map_location=device
-                    )
-                    model.model.load_state_dict(adapter_weights, strict=False)
-                    logger.info("Loaded LoRA weights via state dict")
-                except Exception as e2:
-                    logger.warning(f"Failed to load LoRA weights via state dict: {e2}")
-        else:
-            # 如果不是PeftModel，尝试创建
-            try:
-                model.model = PeftModel.from_pretrained(
-                    model.model,
-                    lora_weights_path,
-                    is_trainable=True
-                )
-                logger.info("Successfully loaded LoRA weights into base model")
-            except Exception as e:
-                logger.warning(f"Failed to load LoRA weights: {e}")
+    # 1. 加载 LoRA 权重
+    if lora_weights_path:
+        if not os.path.exists(lora_weights_path):
+            raise FileNotFoundError(f"LoRA weights path not found: {lora_weights_path}")
+            
+        logger.info(f"Loading LoRA weights from: {lora_weights_path}")
+        # 强制使用 PeftModel 加载，不进行任何 try-except 容错
+        model.model = PeftModel.from_pretrained(
+            model.model, 
+            lora_weights_path,
+            is_trainable=True 
+        )
+        logger.info("Successfully loaded LoRA weights.")
     
-    # 加载投影器权重（如果存在）
-    if projector_path and os.path.exists(projector_path):
-        logger.info(f"Loading pre-trained projector weights from: {projector_path}")
-        try:
-            projector_state_dict = torch.load(projector_path, map_location=device)
-            model.projector.load_state_dict(projector_state_dict)
-            logger.info("Successfully loaded projector weights")
-        except Exception as e:
-            logger.warning(f"Failed to load projector weights: {e}")
+    # 2. 加载投影器权重
+    if projector_path:
+        if not os.path.exists(projector_path):
+            raise FileNotFoundError(f"Projector weights path not found: {projector_path}")
+            
+        logger.info(f"Loading projector weights from: {projector_path}")
+        # 强制加载状态字典
+        projector_state_dict = torch.load(projector_path, map_location=device)
+        model.projector.load_state_dict(projector_state_dict)
+        logger.info("Successfully loaded projector weights.")
     
     return model
 
@@ -209,6 +149,7 @@ def train_sft_lora(
     wandb_run_name=None,
     wandb_entity=None,
     mol_config=None,  # 新增：显式传入分子配置
+    include_cot=True, # 新增：是否包含 CoT
 ):
     """
     使用LoRA进行SFT训练，支持从预训练权重继续训练
@@ -237,46 +178,40 @@ def train_sft_lora(
     # 0. 初始化wandb
     # ============================
     logger.info(f"Initializing wandb for experiment tracking...")
-    try:
-        # 如果未指定run_name，自动生成一个包含时间戳的名称
-        if wandb_run_name is None:
-            from datetime import datetime
-            wandb_run_name = f"qwen3-lora-sft-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        
-        # 初始化wandb
-        wandb.init(
-            project=wandb_project,
-            name=wandb_run_name,
-            entity=wandb_entity,
-            config={
-                "model_name": model_name,
-                "data_path": data_path,
-                "output_dir": output_dir,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "learning_rate": lr,
-                "max_seq_length": max_seq_length,
-                "training_strategy": "LoRA-SFT",
-                "lora_r": 16,
-                "lora_alpha": 32,
-                "lora_dropout": 0.1,
-                "optimizer": "adamw_8bit",
-                "mixed_precision": "bf16",
-                "gradient_accumulation": 4,
-                "resume_from_checkpoint": resume_from_checkpoint,
-                "lora_weights_path": lora_weights_path,
-                "projector_path": projector_path,
-                "num_queries": mol_config['num_queries'],
-                "training_stage": "second_stage" if (resume_from_checkpoint or lora_weights_path) else "first_stage"
-            }
-        )
-        
-        logger.info(f"Wandb initialized: project={wandb_project}, run={wandb_run_name}")
-        
-    except Exception as e:
-        logger.warning(f"Failed to initialize wandb: {e}")
-        logger.warning("Continuing without wandb...")
-        wandb.init(mode="disabled")
+    # 如果未指定run_name，自动生成一个包含时间戳的名称
+    if wandb_run_name is None:
+        from datetime import datetime
+        wandb_run_name = f"qwen3-lora-sft-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    
+    # 初始化wandb (取消 try-except，如果失败建议检查网络或设置 WANDB_MODE=offline)
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+        entity=wandb_entity,
+        config={
+            "model_name": model_name,
+            "data_path": data_path,
+            "output_dir": output_dir,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "max_seq_length": max_seq_length,
+            "training_strategy": "LoRA-SFT",
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.1,
+            "optimizer": "adamw_8bit",
+            "mixed_precision": "bf16",
+            "gradient_accumulation": 4,
+            "resume_from_checkpoint": resume_from_checkpoint,
+            "lora_weights_path": lora_weights_path,
+            "projector_path": projector_path,
+            "num_queries": mol_config['num_queries'],
+            "include_cot": include_cot,
+            "training_stage": "second_stage" if (resume_from_checkpoint or lora_weights_path) else "first_stage"
+        }
+    )
+    logger.info(f"Wandb initialized: project={wandb_project}, run={wandb_run_name}")
     
     # ============================
     # 1. 初始化基础模型
@@ -341,8 +276,8 @@ def train_sft_lora(
     # ============================
     # 4. 加载数据集
     # ============================
-    logger.info(f"Loading dataset from {data_path}...")
-    train_dataset = load_data(data_path)
+    logger.info(f"Loading dataset from {data_path} (Include CoT: {include_cot}, Max Len: {max_seq_length})...")
+    train_dataset = load_data(data_path, include_cot=include_cot, max_len=max_seq_length)
     logger.info(f"Dataset loaded: {len(train_dataset)} samples")
     
     # 记录数据集信息到wandb
@@ -370,19 +305,20 @@ def train_sft_lora(
         dataset_text_field=None,
         remove_unused_columns=False,
         logging_steps=10,
+        eval_strategy="no", # 不做划分，直接全部训练
         save_steps=100,
         save_total_limit=3,
-        gradient_checkpointing=False,
+        gradient_checkpointing=True, # 🚨 针对 8192 长度默认开启，防止 OOM
         max_grad_norm=0.3,
         warmup_ratio=0.1,
-        report_to="none", # 🚨 默认设为 none，如需开启可在命令行指定或修改此值
+        report_to="wandb", # 🚨 开启官方 wandb 支持
         dataloader_pin_memory=False,
         dataloader_num_workers=2,
         optim="adamw_8bit",
         lr_scheduler_type="cosine",
         weight_decay=0.01,
         logging_dir=os.path.join(output_dir, "logs"),
-        resume_from_checkpoint=resume_from_checkpoint,  # 支持从检查点恢复
+        resume_from_checkpoint=resume_from_checkpoint,
     )
     
     # 打印训练配置
@@ -401,15 +337,18 @@ def train_sft_lora(
     # ============================
     logger.info("Initializing SFTTrainer...")
     
-    # 根据配置生成对齐器
-    dynamic_collate_fn = get_collate_fn(num_queries=mol_config['num_queries'])
+    data_collator = MultiModalDataCollator(
+        tokenizer=tokenizer,
+        model=model.model,
+        padding=True,
+    )
     
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer, # 回退到旧版本的参数名
-        data_collator=dynamic_collate_fn,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
         callbacks=[LoraTrainingMonitorCallback()],
     )
     
@@ -420,9 +359,9 @@ def train_sft_lora(
     try:
         if len(train_dataset) > 0:
             test_sample = [train_dataset[0]]
-            test_batch = dynamic_collate_fn(test_sample)
+            test_batch = data_collator(test_sample)
             
-            # 获取模型主显卡，不再手动对模型调用 .to(device)
+            # 获取模型主显卡
             device = next(model.parameters()).device
             
             test_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
@@ -456,7 +395,6 @@ def train_sft_lora(
     logger.info("Starting LoRA training...")
     
     try:
-        import time
         start_time = time.time()
         
         # 开始训练
@@ -497,7 +435,6 @@ def train_sft_lora(
         
         # 保存训练配置
         config_save_path = os.path.join(output_dir, "training_config.json")
-        import json
         config_dict = {
             "model_name": model_name,
             "data_path": data_path,
@@ -560,7 +497,7 @@ def train_sft_lora(
         except Exception as e:
             logger.warning(f"Failed to merge LoRA weights: {e}")
             logger.warning("Using unmerged model for inference")
-        
+
         # 完成wandb运行
         if wandb.run is not None:
             wandb.finish()
@@ -571,11 +508,15 @@ def train_sft_lora(
         logger.error("CUDA out of memory during LoRA training!")
         logger.error("Try reducing batch_size or max_seq_length")
         if wandb.run is not None:
+            # 记录 OOM 事件到 wandb
+            wandb.log({"error/oom": 1})
             wandb.finish(exit_code=1)
         raise
     
     except Exception as e:
         logger.error(f"LoRA training failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         if wandb.run is not None:
             wandb.finish(exit_code=1)
         raise
@@ -654,21 +595,101 @@ def load_lora_model_for_inference(
     return model, tokenizer
 
 
-# 推理测试函数 - 修复设备问题
-def test_lora_inference(
+# 加载测试数据
+def load_test_data(test_data_path):
+    """
+    从JSON文件加载测试数据
+    
+    Args:
+        test_data_path: 测试数据路径（可以是文件或目录）
+    
+    Returns:
+        test_cases: 测试用例列表，每个元素包含 {smiles, query, label (if available), cot (if available)}
+    """
+    import glob
+    from datasets import load_dataset
+    
+    logger.info(f"Loading test data from: {test_data_path}")
+    
+    # 判断是文件还是目录
+    if os.path.isfile(test_data_path):
+        data_files = [test_data_path]
+    elif os.path.isdir(test_data_path):
+        # 扫描所有 JSON 文件并排除 rxn/rcr.json
+        all_json_files = glob.glob(os.path.join(test_data_path, "**/*.json"), recursive=True)
+        data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
+    else:
+        raise ValueError(f"Test data path not found: {test_data_path}")
+    
+    logger.info(f"Found {len(data_files)} test files:")
+    for f in sorted(data_files):
+        logger.info(f"  - {f}")
+    
+    # 加载数据
+    ds = load_dataset("json", data_files=data_files)["train"]
+    
+    # 提取字段（使用 dataloader 中的 extract_fields 函数）
+    from dataloader import extract_fields
+    test_cases = []
+    
+    for example in ds:
+        try:
+            processed = extract_fields(example)
+            test_cases.append({
+                "smiles": processed["input_smiles"],
+                "query": processed["query"],
+                "label": processed.get("label", None),
+                "cot": processed.get("cot", None)
+            })
+        except Exception as e:
+            logger.warning(f"Failed to process test example: {e}")
+            continue
+    
+    logger.info(f"Loaded {len(test_cases)} test cases")
+    return test_cases
+
+
+# 推理测试函数
+def run_inference_on_test_data(
     model,
     tokenizer,
-    test_smiles=[["CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl"]],
-    test_prompts=["Modify the molecule CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl by adding a carboxyl."],
-    max_new_tokens=1024,
+    test_data_path,
+    max_new_tokens=2048,
     temperature=0.7,
     top_p=0.9,
-    device="cuda" if torch.cuda.is_available() else "cpu"
+    device="cuda" if torch.cuda.is_available() else "cpu",
+    save_results_path=None,
+    batch_size=1,
+    max_samples=None
 ):
     """
-    测试LoRA模型的推理能力 - 修复设备问题版本
+    在测试数据上运行推理
+    
+    Args:
+        model: 加载的模型
+        tokenizer: 分词器
+        test_data_path: 测试数据路径（文件或目录）
+        max_new_tokens: 最大生成token数
+        temperature: 温度参数
+        top_p: top-p采样参数
+        device: 设备
+        save_results_path: 保存结果的文件路径
+        batch_size: 批次大小（当前仅支持1）
+        max_samples: 最大测试样本数（None表示全部测试）
+    
+    Returns:
+        results: 推理结果列表
     """
-    logger.info(f"Testing LoRA model inference on {device}...")
+    logger.info(f"Running inference on test data from {test_data_path}")
+    logger.info(f"Device: {device}, Max new tokens: {max_new_tokens}")
+    
+    # 加载测试数据
+    test_cases = load_test_data(test_data_path)
+    
+    # 限制测试样本数
+    if max_samples is not None and max_samples < len(test_cases):
+        logger.info(f"Limiting test to first {max_samples} samples")
+        test_cases = test_cases[:max_samples]
     
     # 确保模型在正确设备上
     model.eval()
@@ -676,19 +697,20 @@ def test_lora_inference(
     
     results = []
     
-    for smiles, prompt in zip(test_smiles, test_prompts):
-        print(smiles)
-        # 清理SMILES
-        cleaned_smiles = [smile.replace(".", "").strip() for smile in smiles]
-        
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Input SMILES: {cleaned_smiles}")
-        logger.info(f"Input prompt: {prompt}")
+    # 逐个样本推理
+    for idx, test_case in enumerate(test_cases):
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing sample {idx+1}/{len(test_cases)}")
+        logger.info(f"Input SMILES: {test_case['smiles']}")
+        logger.info(f"Input query: {test_case['query'][:200]}...")  # 显示前200字符
         
         try:
+            # 清理SMILES（移除点号分隔符）
+            cleaned_smiles = [s.replace(".", "").strip() for s in test_case['smiles']]
+            
             # 编码提示文本
             encodings = tokenizer(
-                prompt,
+                test_case['query'],
                 padding=True,
                 truncation=True,
                 max_length=2048,
@@ -699,152 +721,66 @@ def test_lora_inference(
             input_ids = encodings["input_ids"].to(device)
             attention_mask = encodings["attention_mask"].to(device)
             
-            # 打印设备信息以调试
-            logger.info(f"Model device: {next(model.parameters()).device}")
-            logger.info(f"Input IDs device: {input_ids.device}")
-            logger.info(f"Attention mask device: {attention_mask.device}")
-            
-            # 生成回复 - 关键修复：确保smiles也在正确设备上处理
+            # 生成回复
             with torch.no_grad():
-                # 调用模型的generate方法
                 generated_ids = model.generate(
-                    smiles_list=[cleaned_smiles],  # SMILES列表
-                    input_ids=input_ids,  # 文本输入
-                    attention_mask=attention_mask,  # 注意力掩码
+                    smiles_list=[cleaned_smiles],
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    do_sample=True,
-      
+                    do_sample=True if temperature > 0 else False,
                 )
             
             # 解码结果
-            print(generated_ids)
             generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            print("generate_text:",generated_text)
             
-            # 提取生成的回答
-            # if generated_text.startswith(prompt):
-            #     answer = generated_text[len(prompt):].strip()
-            # else:
-            #     answer = generated_text
-            answer=generated_text[len(prompt)+130:].strip()
+            logger.info(f"Generated response: {generated_text[:200]}...")  # 显示前200字符
             
-            logger.info(f"Generated response: {answer}")
-            results.append({
-                "smiles": cleaned_smiles,
-                "prompt": prompt,
-                "response": answer,
-                "full_output": generated_text
-            })
+            # 保存结果
+            result = {
+                "sample_id": idx,
+                "smiles": test_case['smiles'],
+                "query": test_case['query'],
+                "generated_response": generated_text.strip(),
+                "ground_truth_label": test_case.get('label', None),
+                "ground_truth_cot": test_case.get('cot', None)
+            }
+            results.append(result)
             
         except Exception as e:
-            logger.error(f"Error during inference: {e}")
+            logger.error(f"Error processing sample {idx}: {e}")
             import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            # 尝试更简单的测试
-            try:
-                logger.info("Trying simpler forward pass...")
-                
-                # 创建一个简单的测试
-                with torch.no_grad():
-                    # 使用一个更简单的前向传播
-                    test_inputs = {
-                        "smiles": [cleaned_smiles],
-                        "input_ids": torch.tensor([[tokenizer.bos_token_id]], device=device),
-                        "attention_mask": torch.tensor([[1]], device=device),
-                    }
-                    
-                    outputs = model(**test_inputs)
-                    logger.info(f"Simple forward pass successful!")
-                    
-                results.append({
-                    "smiles": cleaned_smiles,
-                    "prompt": prompt,
-                    "response": "[Model loaded but generation may have issues]",
-                    "note": "Forward pass successful"
-                })
-                
-            except Exception as e2:
-                logger.error(f"Simple test also failed: {e2}")
-                results.append({
-                    "smiles": cleaned_smiles,
-                    "prompt": prompt,
-                    "error": str(e2)
-                })
+            logger.error(traceback.format_exc())
+            results.append({
+                "sample_id": idx,
+                "smiles": test_case['smiles'],
+                "query": test_case['query'],
+                "generated_response": None,
+                "error": str(e),
+                "ground_truth_label": test_case.get('label', None),
+                "ground_truth_cot": test_case.get('cot', None)
+            })
         
-        logger.info(f"{'='*50}\n")
+        # 清理GPU缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
-    return results
-
-
-# 批量测试函数
-def batch_test_lora_inference(
-    model,
-    tokenizer,
-    test_cases=None,
-    max_new_tokens=2048,
-    temperature=0.7,
-    top_p=0.9,
-    device="cuda" if torch.cuda.is_available() else "cpu",
-    save_results_path=None
-):
-    """
-    批量测试LoRA模型的推理能力
-    
-    Args:
-        model: 加载的模型
-        tokenizer: 分词器
-        test_cases: 测试用例列表，每个元素是(smiles_list, prompt)元组
-        max_new_tokens: 最大生成token数
-        temperature: 温度参数
-        top_p: top-p采样参数
-        device: 设备
-        save_results_path: 保存结果的文件路径
-    
-    Returns:
-        results: 推理结果列表
-    """
-    if test_cases is None:
-        # 默认测试用例
-        test_cases = [
-            (["CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl"], 
-             "Modify the molecule CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl by adding a carboxyl."),
-            (["CCO"], 
-             "Describe the properties of ethanol (CCO)."),
-            (["CC(C)Cc1ccc(cc1)C(C)C(=O)O"], 
-             "What is the IUPAC name of this molecule?")
-        ]
-    
-    # 解包测试用例
-    test_smiles = [case[0] for case in test_cases]
-    test_prompts = [case[1] for case in test_cases]
-    
-    # 执行测试
-    results = test_lora_inference(
-        model=model,
-        tokenizer=tokenizer,
-        test_smiles=test_smiles,
-        test_prompts=test_prompts,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        device=device,
-        verbose=True
-    )
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Inference completed on {len(results)} samples")
     
     # 保存结果
     if save_results_path:
-        import json
         from datetime import datetime
         
         # 准备保存的数据
         save_data = {
             "timestamp": datetime.now().isoformat(),
+            "test_data_path": test_data_path,
             "model_info": {
                 "device": str(device),
-                "parameters": sum(p.numel() for p in model.parameters()),
+                "total_parameters": sum(p.numel() for p in model.parameters()),
                 "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
             },
             "generation_config": {
@@ -852,11 +788,12 @@ def batch_test_lora_inference(
                 "temperature": temperature,
                 "top_p": top_p,
             },
+            "num_samples": len(results),
             "test_results": results
         }
         
         # 确保目录存在
-        os.makedirs(os.path.dirname(save_results_path), exist_ok=True)
+        os.makedirs(os.path.dirname(save_results_path) if os.path.dirname(save_results_path) else ".", exist_ok=True)
         
         # 保存到JSON文件
         with open(save_results_path, 'w', encoding='utf-8') as f:
@@ -872,12 +809,17 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="LoRA微调多模态分子-语言模型")
-    parser.add_argument("--mode", type=str, choices=["train", "inference", "continue"], default="train", help="运行模式")
-    parser.add_argument("--model_path", type=str, default=ModelConfig.DEFAULT_OUTPUT_DIR, help="保存/加载模型的路径")
+    parser.add_argument("--mode", type=str, choices=["train", "inference"], default="train", help="运行模式")
+    parser.add_argument("--output_dir", type=str, default=ModelConfig.DEFAULT_OUTPUT_DIR, help="保存/加载模型的路径")
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH, help="数据路径")
     parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
-    parser.add_argument("--max_seq_length", type=int, default=512, help="最大序列长度")
+    parser.add_argument("--max_seq_length", type=int, default=8192, help="最大序列长度")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
+    parser.add_argument("--include_cot", type=lambda x: (str(x).lower() == 'true'), default=True, help="是否在 Response 中包含思维链 (CoT)")
+    
+    # 权重加载参数
+    parser.add_argument("--lora_path", type=str, default=None, help="预训练 LoRA 权重路径")
+    parser.add_argument("--projector_path", type=str, default=None, help="预训练投影器权重路径")
     
     # 分子模型超参数
     parser.add_argument("--num_queries", type=int, default=ModelConfig.NUM_QUERIES, help="投影器查询向量数量")
@@ -889,6 +831,14 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_run_name", type=str, default=None, help="wandb运行名称")
     parser.add_argument("--wandb_entity", type=str, default=None, help="wandb团队/实体名称")
     
+    # 推理模式参数
+    parser.add_argument("--test_data_path", type=str, default=None, help="测试数据路径（用于inference模式）")
+    parser.add_argument("--max_new_tokens", type=int, default=2048, help="生成的最大token数（用于inference模式）")
+    parser.add_argument("--temperature", type=float, default=0.7, help="生成温度（用于inference模式）")
+    parser.add_argument("--top_p", type=float, default=0.9, help="top-p采样参数（用于inference模式）")
+    parser.add_argument("--max_test_samples", type=int, default=None, help="最大测试样本数，None表示全部测试（用于inference模式）")
+    parser.add_argument("--inference_results_path", type=str, default=None, help="推理结果保存路径（用于inference模式）")
+    
     args = parser.parse_args()
     
     # 构建分子配置字典
@@ -899,73 +849,62 @@ if __name__ == "__main__":
     }
     
     if args.mode == "train":
-        # 第一轮训练（从头开始）
+        # 统一训练入口
+        logger.info(f"Starting training mode...")
         trained_model = train_sft_lora(
             data_path=args.data_path,
-            output_dir=args.model_path,
+            output_dir=args.output_dir,
             batch_size=args.batch_size,
             max_seq_length=args.max_seq_length,
             epochs=args.epochs,
+            lora_weights_path=args.lora_path,
+            projector_path=args.projector_path,
+            resume_from_checkpoint=args.resume_checkpoint,
             wandb_project=args.wandb_project,
             wandb_run_name=args.wandb_run_name,
             wandb_entity=args.wandb_entity,
-            mol_config=mol_config,  # 传入配置
+            mol_config=mol_config,
+            include_cot=args.include_cot,
         )
-        
-        # 训练完成后测试
-        logger.info("Testing trained model...")
-        # test_lora_inference函数保持不变
-        # ...
-    
-    elif args.mode == "continue":
-        # 第二轮训练（从第一轮保存的参数继续）
-        logger.info("Starting second stage training with pre-trained weights...")
-        
-        # 构建预训练权重路径
-        lora_weights_path = os.path.join(args.model_path, "lora_weights")
-        projector_path = os.path.join(args.model_path, "projector.pt")
-        
-        # 检查权重文件是否存在
-        if not os.path.exists(lora_weights_path):
-            logger.warning(f"LoRA weights not found at: {lora_weights_path}")
-            logger.warning("Falling back to training from scratch...")
-            lora_weights_path = None
-        
-        if not os.path.exists(projector_path):
-            logger.warning(f"Projector weights not found at: {projector_path}")
-            projector_path = None
-        
-        # 进行第二轮训练
-        trained_model = train_sft_lora(
-            data_path=args.data_path,
-            output_dir=args.model_path + "_stage2",  # 使用不同的输出目录
-            batch_size=args.batch_size,
-            max_seq_length=args.max_seq_length,
-            epochs=args.epochs,
-            lora_weights_path=lora_weights_path,
-            projector_path=projector_path,
-            resume_from_checkpoint=args.resume_checkpoint,
-            wandb_project=args.wandb_project,
-            wandb_run_name=args.wandb_run_name + "-stage2" if args.wandb_run_name else "qwen3-lora-sft-stage2",
-            wandb_entity=args.wandb_entity,
-            mol_config=mol_config,  # 传入配置
-        )
-        
-        logger.info("Second stage training completed!")
+        logger.info("Training completed!")
     
     elif args.mode == "inference":
         # 推理模式
+        logger.info(f"Starting inference mode...")
+        # 如果没有指定 lora_path，默认从 output_dir 寻找
+        lora_path = args.lora_path or os.path.join(args.output_dir, "lora_weights")
+        projector_path = args.projector_path or os.path.join(args.output_dir, "projector.pt")
+        
+        # 确定测试数据路径
+        test_data_path = args.test_data_path or args.data_path
+        if not test_data_path:
+            raise ValueError("Please specify test data path using --test_data_path or --data_path")
+        
+        # 确定结果保存路径
+        if args.inference_results_path:
+            results_path = args.inference_results_path
+        else:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
+        
         model, tokenizer = load_lora_model_for_inference(
-            base_model_path=None, # 会自动读取配置
-            lora_weights_path=os.path.join(args.model_path, "lora_weights"),
-            projector_path=os.path.join(args.model_path, "projector.pt"),
-            mol_config=mol_config # 传入配置
+            base_model_path=None, 
+            lora_weights_path=lora_path,
+            projector_path=projector_path,
+            mol_config=mol_config
         )
         
-        # 测试推理
-        test_lora_inference(
-            model,
-            tokenizer,
-            test_smiles=[["CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl"]],
-            test_prompts=["Modify the molecule CC1[NH2+]CCC1C(=O)Nc1cc(C(N)=O)ccc1Cl by adding a carboxyl."]
+        # 在测试数据上运行推理
+        run_inference_on_test_data(
+            model=model,
+            tokenizer=tokenizer,
+            test_data_path=test_data_path,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            save_results_path=results_path,
+            max_samples=args.max_test_samples
         )
+        
+        logger.info("Inference completed!")
