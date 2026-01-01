@@ -4,8 +4,10 @@
 
 import json
 import re
+from collections import OrderedDict
 import torch
 import os
+import glob
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from config import ModelConfig
@@ -37,24 +39,122 @@ def extract_fields(example):
     # meta 字段是一个 JSON 字符串，需要先解析
     meta_dict = json.loads(example["meta"])
 
-    # label 优先级选择
+    # 解析 struct_cot 用于构造 cot
+    struct_cot = example.get("struct_cot")
+    cot_dict = json.loads(struct_cot, object_pairs_hook=OrderedDict)
+    
+    # 构造格式化的 cot 字符串
+    cot_lines = []
+    for i, (k, v) in enumerate(cot_dict.items()):
+        cot_lines.append(f"Step {i+1}:\n{k}: {v}")
+    cot_value = "\n\n".join(cot_lines)
+
+    # label 优先级选择：gt > reference > struct_cot["output"]
     if meta_dict.get("gt"):
         label_value = str(meta_dict["gt"])
     elif meta_dict.get("reference"):
         label_value = str(meta_dict["reference"])
     else:
-        # 从 struct_cot 中用正则提取 "output": "xxx"
-        struct_cot = example.get("struct_cot", "")
-        match = re.search(r'"output"\s*:\s*"(\w+)"', struct_cot)
-        label_value = match.group(1) if match else ""
+        label_value = str(cot_dict.get("output"))
+
+    # 提取 SMILES
+    raw_val = meta_dict.get("molecule")
+    if raw_val is None:
+        raw_val = meta_dict.get("reactants")
+    
+    # 统一转为列表处理
+    if isinstance(raw_val, str):
+        val_list = [raw_val]
+    elif isinstance(raw_val, list):
+        val_list = raw_val
+    else:
+        val_list = []
+        
+    # 按 '.' 切分并处理末尾点的情况，同时保持顺序
+    input_smiles = []
+    for s in val_list:
+        if isinstance(s, str):
+            # split('.') 会把 "C.C." 变成 ["C", "C", ""]
+            # 通过 if part 过滤掉空字符串，正好相当于去掉了末尾的点或连续的点
+            for part in s.split('.'):
+                if part:
+                    input_smiles.append(part)
+
+    # 处理 query 中的 SMILES 标记
+    query = example.get("query")
+    
+    # --------------------------------
+    # 替换特定的 JSON 格式要求为 <answer> 格式
+    # --------------------------------
+    if query:
+        # 1. 删除无意义的说明句子
+        junk_patterns = [
+            r'Do not provide any additional information beyond the requested SMILES strings\.?',
+            r'The answer should be a json format that includes the potential byproduct SMILES:?',
+            r'The answer should be a json format that includes the major product SMILES:?',
+        ]
+        for pattern in junk_patterns:
+            query = re.sub(pattern, "", query, flags=re.IGNORECASE)
+
+        # 标记是否成功匹配并替换了任何 JSON 格式块
+        matched_format = False
+
+        # 2. 分开匹配不同的引导语和对应的 Key 块
+        # 处理 "Your response must be" 类型
+        your_response_keys = {
+            "Final Target Molecule": "SMILES",
+            "Output Scaffold": "SMILES",
+            "count": "Your Answer Number",
+            "output": "Yes / No"
+        }
+        for key, placeholder in your_response_keys.items():
+            pattern = rf'Your response must be[^{{]*?\{{[^}}]*?"{key}"[^}}]*?\}}'
+            # 使用 subn 获取替换次数 n
+            query, n = re.subn(pattern, f'Your final answer must be formatted as <answer> {placeholder} </answer>', query, flags=re.DOTALL)
+            if n > 0:
+                matched_format = True
+
+        # 处理 "Answer:" 类型
+        answer_keys = {
+            "By Product": "SMILES",
+            "Major Product": "SMILES"
+        }
+        for key, placeholder in answer_keys.items():
+            pattern = rf'Answer:[^{{]*?\{{[^}}]*?"{key}"[^}}]*?\}}'
+            query, n = re.subn(pattern, f'Your final answer must be formatted as <answer> {placeholder} </answer>', query, flags=re.DOTALL)
+            if n > 0:
+                matched_format = True
+        
+        # 如果没有任何特定的 JSON 块被匹配上，追加默认格式指令
+        if not matched_format:
+            query = query.rstrip() + "\nYour final answer must be formatted as <answer> Your Answer </answer>"
+        
+        query = query.strip()
+
+    if query and input_smiles:
+        # 1. 按长度从长到短排序，防止短 SMILES (如 C) 误匹配长 SMILES (如 CC) 的一部分
+        indexed_smiles = sorted(enumerate(input_smiles), key=lambda x: len(x[1]), reverse=True)
+        
+        # 边界检查字符集：防止误伤单词（Cat）或长链内部（C1...）
+        smiles_chars = r'a-zA-Z0-9\[\]\(\)\=#@+\-\/\\%'
+        
+        for i, s in indexed_smiles:
+            # 使用正则进行边界检查，确保匹配的是独立的 SMILES 实体
+            pattern = rf'(?<![{smiles_chars}]){re.escape(s)}(?![{smiles_chars}])'
+            if re.search(pattern, query):
+                query = re.sub(pattern, f"{s} (the {i+1}-th SMILES)", query)
+            else:
+                print(f"SMILES not found in query: {s}")
 
     return {
         # LLM 输入的文本 prompt
-        "query": example.get("query", ""),
-        # 分子 SMILES，去掉可能存在的 '.'（多片段）
-        "input_smiles": meta_dict.get("molecule", "C").replace(".", ""),
+        "query": query,
+        # 分子 SMILES 列表
+        "input_smiles": input_smiles,
         # LLM 的监督答案
-        "label": label_value,
+        "label": f"<answer> {label_value} </answer>",
+        # 结构化思维链 (CoT)
+        "cot": cot_value,
     }
 
 
@@ -129,8 +229,16 @@ def load_data(path):
     3. 将文本转为 LLM 可训练的 token 格式
     """
 
-    # 加载 HuggingFace datasets 格式的数据，使用传入的 path
-    ds = load_dataset(path)["train"]
+    # 扫描所有 JSON 文件并排除 rxn/rcr.json
+    all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
+    data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
+    
+    print(f"Loading {len(data_files)} JSON files...")
+    for f in sorted(data_files):
+        print(f" - {os.path.relpath(f, path)}")
+    
+    # 加载过滤后的数据文件
+    ds = load_dataset("json", data_files=data_files)["train"]
 
     # --------------------------------
     # Step 1: 提取结构化字段
@@ -154,12 +262,45 @@ def load_data(path):
 
 
 # --------------------------------
-# 4. 运行示例 (仅在直接运行该脚本时执行)
+# 4. 运行示例与测试
 # --------------------------------
 if __name__ == "__main__":
-    # 使用配置文件中的默认路径
-    dataset = load_data(ModelConfig.DEFAULT_DATA_PATH)
+    # 测试路径
+    DATA_ROOT = "/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot"
+    
+    # 获取所有 JSON 文件
+    all_json_files = glob.glob(os.path.join(DATA_ROOT, "**/*.json"), recursive=True)
+    test_files = [f for f in all_json_files if not f.endswith("rcr.json")]
+    
+    print(f"\n{'='*20} Testing Query Replacement {'='*20}")
+    
+    for f_path in sorted(test_files):
+        rel_path = os.path.relpath(f_path, DATA_ROOT)
+        try:
+            with open(f_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if not data:
+                continue
+            
+            # 如果是 fs_by_product.json，测试前 15 条，否则测试第 1 条
+            num_to_test = 15 if "fs_by_product.json" in rel_path else 1
+            
+            print(f"\n{'#'*10} [FILE]: {rel_path} (Testing {num_to_test} samples) {'#'*10}")
+            
+            for i in range(min(len(data), num_to_test)):
+                example = data[i]
+                processed = extract_fields(example)
+                
+                print(f"\n--- Sample {i+1} ---")
+                for key, val in processed.items():
+                    print(f"[{key.upper()}]:\n{val}\n")
+            
+            print(f"\n{'='*60}")
+            
+        except Exception as e:
+            print(f"Error processing {rel_path}: {e}")
 
-    print("Final tokenized dataset example:")
-    if len(dataset) > 0:
-        print(dataset[0])
+    # 也可以保留原有的全量加载测试（可选）
+    # dataset = load_data(DATA_ROOT)
+    # print(f"\nTotal samples loaded: {len(dataset)}")
