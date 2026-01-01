@@ -14,7 +14,9 @@ conda env create -f biolatent_environment1.yml
 
 conda activate biolatenecot_dev
 
-pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1
+pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1 
+
+pip install plotext
 
 
 📊 Data Preparation
@@ -64,15 +66,21 @@ huggingface-cli download --resume-download ibm-research/materials.smi-ted --loca
 
 🏋️ Training sft
 
-CUDA_VISIBLE_DEVICES=0 python train_sft_stage2.py --mode train --data_path ../ChemCotDataset/chemcotbench-cot --model_path ./qwen3_mol_sft_lora_results --batch_size 2 --max_seq_length 512 --epochs 3
-
 accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
   --mode train \
+  --include_cot false \
+  --output_dir ./outputs/stage1_no_cot \
   --batch_size 2 \
   --epochs 3
 
-python train_sft_stage2.py   --mode train   --data_path ../ChemCotDataset/chemcotbench-cot   --model_path ./qwen3_mol_sft_lora_results   --batch_size 2   --max_seq_length 512   --epochs 3
-
+accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
+  --mode train \
+  --include_cot true \
+  --lora_path ./outputs/stage1_no_cot/lora_weights \
+  --projector_path ./outputs/stage1_no_cot/projector.pt \
+  --output_dir ./outputs/stage2_with_cot \
+  --batch_size 2 \
+  --epochs 3
 
 🏋️ Training sft_cot
 

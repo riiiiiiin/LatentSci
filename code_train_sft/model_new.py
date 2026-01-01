@@ -172,6 +172,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 确保投影器类型与基础模型一致
         self.projector.to(self.model.dtype)
 
+    def gradient_checkpointing_enable(self, **kwargs):
+        """
+        开启梯度检查点，转发给内部的语言模型。
+        """
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable(**kwargs)
+            
+    def gradient_checkpointing_disable(self):
+        """
+        关闭梯度检查点。
+        """
+        if hasattr(self.model, "gradient_checkpointing_disable"):
+            self.model.gradient_checkpointing_disable()
+
     def forward(
         self,
         input_ids=None,

@@ -39,23 +39,46 @@ def extract_fields(example):
     # meta 字段是一个 JSON 字符串，需要先解析
     meta_dict = json.loads(example["meta"])
 
-    # 解析 struct_cot 用于构造 cot
-    struct_cot = example.get("struct_cot")
-    cot_dict = json.loads(struct_cot, object_pairs_hook=OrderedDict)
+    # 2. 解析 struct_cot
+    # 第一步：初次解析，处理可能的 JSON 转义
+    try:
+        cot_content = json.loads(example["struct_cot"], object_pairs_hook=OrderedDict)
+    except json.JSONDecodeError as e:
+        print(f"\n[CRITICAL DATA ERROR] JSON is malformed in example ID: {example.get('id')}")
+        print(f"[ERROR DETAILS]: {e}")
+        print(f"[RAW CONTENT]: {repr(example.get('struct_cot'))}")
+        raise  # 依然抛出错误，中断训练
     
-    # 构造格式化的 cot 字符串
+    # 第二步：如果解析出来是带 Markdown 标签的字符串，则剥离标签并进行二次解析
+    if isinstance(cot_content, str):
+        cleaned = cot_content.strip()
+        if cleaned.startswith("```json"):
+            # 移除开头的 ```json 和结尾的 ```
+            cleaned = cleaned[7:-3].strip()
+        # 二次解析，如果格式不对这里会直接报错
+        try:
+            cot_dict = json.loads(cleaned, object_pairs_hook=OrderedDict)
+        except json.JSONDecodeError as e:
+            print(f"\n[CRITICAL DATA ERROR] Secondary JSON parsing failed for example ID: {example.get('id')}")
+            print(f"[ERROR DETAILS]: {e}")
+            print(f"[CLEANED CONTENT]: {repr(cleaned)}")
+            raise
+    else:
+        cot_dict = cot_content
+    
+    # 3. 构造 CoT 字符串
     cot_lines = []
     for i, (k, v) in enumerate(cot_dict.items()):
         cot_lines.append(f"Step {i+1}:\n{k}: {v}")
     cot_value = "\n\n".join(cot_lines)
 
-    # label 优先级选择：gt > reference > struct_cot["output"]
+    # 4. 提取 label 优先级
     if meta_dict.get("gt"):
         label_value = str(meta_dict["gt"])
     elif meta_dict.get("reference"):
         label_value = str(meta_dict["reference"])
     else:
-        label_value = str(cot_dict.get("output"))
+        label_value = str(cot_dict["output"])
 
     # 提取 SMILES
     raw_val = meta_dict.get("molecule")
@@ -142,9 +165,12 @@ def extract_fields(example):
             # 使用正则进行边界检查，确保匹配的是独立的 SMILES 实体
             pattern = rf'(?<![{smiles_chars}]){re.escape(s)}(?![{smiles_chars}])'
             if re.search(pattern, query):
-                query = re.sub(pattern, f"{s} (the {i+1}-th SMILES)", query)
+                # 使用 lambda 替换，避免 re.sub 对 SMILES 中反斜杠 (\) 的错误转义
+                replacement = f"{s} (the {i+1}-th SMILES)"
+                query = re.sub(pattern, lambda m: replacement, query)
             else:
-                print(f"SMILES not found in query: {s}")
+                # print(f"SMILES not found in query: {s}")
+                pass
 
     return {
         # LLM 输入的文本 prompt
@@ -241,6 +267,14 @@ def load_data(path, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
     
     # 加载过滤后的数据文件
     ds = load_dataset("json", data_files=data_files)["train"]
+
+    # 过滤已知损坏的数据 ID
+    bad_ids = [
+        "f7e567a6-47de-4c77-8c1f-9049689322e8",
+        "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
+        "9cb0a77d-6203-4686-9c8b-45fd3fc770f2"
+    ]
+    ds = ds.filter(lambda x: x["id"] not in bad_ids)
 
     # --------------------------------
     # Step 1: 提取结构化字段

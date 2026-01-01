@@ -1,7 +1,11 @@
 import torch
 import torch.nn as nn
 from trl import SFTTrainer, SFTConfig
-from transformers import AutoTokenizer, TrainerCallback, DataCollatorForSeq2Seq
+from transformers import (
+    AutoTokenizer, 
+    TrainerCallback, 
+    DataCollatorForSeq2Seq
+)
 from dataloader import load_data
 from model_new import Qwen3MoleculeLLM
 import os
@@ -9,6 +13,7 @@ import time
 import json
 import logging
 import wandb
+import plotext as plt
 from config import ModelConfig
 from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
@@ -75,23 +80,64 @@ class LoraTrainingMonitorCallback(TrainerCallback):
         if wandb.run is not None:
             wandb.log({"epoch": state.epoch})
 
+# 终端绘图回调：用于在控制台实时显示 Loss 曲线
+class TerminalPlotCallback(TrainerCallback):
+    def __init__(self):
+        self.steps = []
+        self.losses = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs and "loss" in logs:
+            # 只有主进程负责绘图
+            if state.is_world_process_zero:
+                self.steps.append(state.global_step)
+                self.losses.append(logs["loss"])
+                
+                # 保持最近的 100 个点以保证终端显示效果
+                display_steps = self.steps[-100:]
+                display_losses = self.losses[-100:]
+
+                # 终端绘图逻辑
+                plt.clf()
+                plt.plot(display_steps, display_losses, marker="dot", color="red", label="SFT Loss")
+                plt.title("Real-time Training Loss (Terminal)")
+                plt.xlabel("Step")
+                plt.ylabel("Loss")
+                
+                # 设置合适终端大小的画布
+                plt.plotsize(100, 25)
+                plt.grid(True)
+                plt.show()
+
 # 工业级多模态数据整理器
 class MultiModalDataCollator(DataCollatorForSeq2Seq):
-    """
-    继承自 DataCollatorForSeq2Seq，支持自动文本补齐和 Label 掩码，
-    同时兼容自定义的 smiles 字段。
-    """
+    # ... (保持不变) ...
     def __call__(self, features):
-        # 1. 提取并移除不支持的 smiles 字段
         smiles = [f.pop("smiles") for f in features]
-        
-        # 2. 调用父类的 __call__ 进行标准补齐
-        # 它会自动将 input_ids 补齐到 pad_token_id，将 labels 补齐到 -100
         batch = super().__call__(features)
-        
-        # 3. 放回 smiles 字段
         batch["smiles"] = smiles
         return batch
+
+# 自定义 SFTTrainer 以支持多模态序列长度变化
+class MultiModalSFTTrainer(SFTTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        重写 compute_loss。
+        SFTTrainer 默认会在 compute_loss 中计算准确率指标，
+        这要求 logits 和 labels 形状必须完全一致。
+        在多模态场景下，序列会被拉长，因此我们回归标准 Trainer 的简单逻辑。
+        
+        注意：模型内部已经计算了正确的平均 Loss，这里直接返回即可。
+        """
+        if return_outputs:
+            loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
+            return loss, outputs
+        
+        # 直接调用模型前向传播获取内部计算好的 Loss
+        outputs = model(**inputs)
+        
+        # 模型已经返回正确的平均 Loss，直接使用
+        return outputs.loss
 
 # 加载已训练的模型组件
 def load_trained_components(
@@ -154,7 +200,6 @@ def train_sft_lora(
     """
     使用LoRA进行SFT训练，支持从预训练权重继续训练
     """
-    # 移除 os.environ["WANDB_MODE"] = "disabled"，由 SFTConfig 控制
     
     if model_name is None:
         model_name = ModelConfig.DEFAULT_QWEN_PATH
@@ -183,11 +228,12 @@ def train_sft_lora(
         from datetime import datetime
         wandb_run_name = f"qwen3-lora-sft-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     
-    # 初始化wandb (取消 try-except，如果失败建议检查网络或设置 WANDB_MODE=offline)
+    # 初始化wandb (使用 mode="offline" 替代环境变量设置)
     wandb.init(
         project=wandb_project,
         name=wandb_run_name,
         entity=wandb_entity,
+        mode="offline",
         config={
             "model_name": model_name,
             "data_path": data_path,
@@ -312,7 +358,6 @@ def train_sft_lora(
         max_grad_norm=0.3,
         warmup_ratio=0.1,
         report_to="wandb", # 🚨 开启官方 wandb 支持
-        dataloader_pin_memory=False,
         dataloader_num_workers=2,
         optim="adamw_8bit",
         lr_scheduler_type="cosine",
@@ -333,23 +378,24 @@ def train_sft_lora(
     logger.info(f"  Pre-trained projector: {projector_path or 'None'}")
     
     # ============================
-    # 6. 初始化SFTTrainer
+    # 6. 初始化 MultiModalSFTTrainer
     # ============================
-    logger.info("Initializing SFTTrainer...")
+    logger.info("Initializing MultiModalSFTTrainer...")
     
+    # 使用工业级整理器
     data_collator = MultiModalDataCollator(
         tokenizer=tokenizer,
-        model=model.model,
+        model=model.model, # 传入基础 LLM 模型以获取 Padding 配置
         padding=True,
     )
     
-    trainer = SFTTrainer(
+    trainer = MultiModalSFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[LoraTrainingMonitorCallback()],
+        callbacks=[LoraTrainingMonitorCallback(), TerminalPlotCallback()],
     )
     
     # ============================
