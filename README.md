@@ -92,16 +92,6 @@ accelerate launch --multi_gpu --num_processes 2 train_coconut.py \
   --max_latent_stage 7 \
   --c_thought 2
 
-exp:
-
-accelerate launch --multi_gpu --num_processes 2 train_coconut.py \
-  --lora_path ./outputs/stage1_no_cot/lora_weights \
-  --projector_path ./outputs/stage1_no_cot/projector.pt \
-  --output_dir ./outputs/coconut \
-  --epochs_per_stage 3 \
-  --max_latent_stage 3 \
-  --c_thought 2
-
 ```
 
 

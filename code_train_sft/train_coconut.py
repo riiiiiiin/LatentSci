@@ -110,6 +110,9 @@ def train_coconut():
             logging_steps=10,
             save_steps=100,
             gradient_checkpointing=True,
+            # 🚨 修复 DDP 错误：使用非重入式 checkpoint 并允许查找未使用参数
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            ddp_find_unused_parameters=True,
             report_to="wandb",
             optim="adamw_8bit",
             lr_scheduler_type="cosine",
