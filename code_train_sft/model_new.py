@@ -130,7 +130,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.config._name_or_path = qwen_model_name
 
         # 添加分子特殊标记
-        self.extra_tokens = ["<mol_start>", "<mol_end>"]
+        self.extra_tokens = ["<mol_start>", "<mol_end>", "<latent>", "<start_latent>", "<end_latent>"]
         self.tokenizer.add_tokens(self.extra_tokens)
 
         # 加载基础语言模型
@@ -146,6 +146,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 获取特殊标记的ID
         self.start_id = self.tokenizer.convert_tokens_to_ids("<mol_start>")
         self.end_id = self.tokenizer.convert_tokens_to_ids("<mol_end>")
+        self.latent_id = self.tokenizer.convert_tokens_to_ids("<latent>")
+        self.start_latent_id = self.tokenizer.convert_tokens_to_ids("<start_latent>")
+        self.end_latent_id = self.tokenizer.convert_tokens_to_ids("<end_latent>")
 
         # 获取LLM的嵌入维度
         self.d_llm = self.model.get_input_embeddings().weight.shape[1]
@@ -185,6 +188,41 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         if hasattr(self.model, "gradient_checkpointing_disable"):
             self.model.gradient_checkpointing_disable()
+
+    def _apply_latent_feedback(self, initial_embeds, attention_mask, latent_positions):
+        """
+        Coconut 核心逻辑：潜空间迭代反馈。
+        将前一步的隐藏状态注入到当前 latent token 的输入中。
+        """
+        B = initial_embeds.shape[0]
+        max_n_latents = max(len(l) for l in latent_positions) if latent_positions else 0
+        
+        if max_n_latents == 0:
+            return initial_embeds
+
+        curr_embeds = initial_embeds
+        for pass_idx in range(max_n_latents):
+            # 执行前向传播获取隐藏状态
+            outputs = self.model(
+                inputs_embeds=curr_embeds,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+                use_cache=False
+            )
+            hidden_states = outputs.hidden_states[-1]
+            
+            # 反馈注入
+            new_embeds = curr_embeds.clone()
+            for b in range(B):
+                if len(latent_positions[b]) > pass_idx:
+                    pos = latent_positions[b][pass_idx]
+                    # 将前一个位置的输出作为当前位置的输入
+                    if pos > 0:
+                        new_embeds[b, pos, :] = hidden_states[b, pos - 1, :]
+            curr_embeds = new_embeds
+            
+        return curr_embeds
 
     def forward(
         self,
@@ -310,18 +348,46 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 final_labels[b, :curr_L] = fused_labels_list[b]
 
         # =========================================================
-        # 4. 调用 LLM 并计算 Loss
+        # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
         # =========================================================
-        outputs = self.model(
-            inputs_embeds=final_embeds,
-            attention_mask=final_attn_mask,
-            labels=final_labels,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-        )
+        has_latent = (input_ids == self.latent_id).any().item()
+        
+        if not has_latent:
+            # --- 标准 SFT 路径 ---
+            outputs = self.model(
+                inputs_embeds=final_embeds,
+                attention_mask=final_attn_mask,
+                labels=final_labels,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+            )
+        else:
+            # --- Coconut 路径 ---
+            # 计算 latent token 的绝对索引
+            latent_positions = []
+            for b in range(B):
+                mol_len_b = mol_counts[b] * (self.num_queries + 2)
+                t_mask_b = attention_mask[b].bool()
+                rel_latent_indices = (input_ids[b][t_mask_b] == self.latent_id).nonzero(as_tuple=True)[0]
+                latent_positions.append((rel_latent_indices + mol_len_b).tolist())
+
+            # 应用潜空间反馈
+            final_embeds_with_thoughts = self._apply_latent_feedback(
+                final_embeds, final_attn_mask, latent_positions
+            )
+            
+            # 最终计算 Loss
+            outputs = self.model(
+                inputs_embeds=final_embeds_with_thoughts,
+                attention_mask=final_attn_mask,
+                labels=final_labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+            )
 
         return CausalLMOutputWithPast(
             loss=outputs.loss,
@@ -426,8 +492,28 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             final_attn_mask[b, diff:] = 1
 
         # =========================================================
-        # 4. 调用生成
+        # 4. Coconut 推理支持
         # =========================================================
+        has_latent = (input_ids == self.latent_id).any().item()
+        
+        if has_latent:
+            # 推理阶段也需要进行潜空间反馈
+            latent_positions = []
+            for b in range(B):
+                mol_len_b = mol_counts[b] * (self.num_queries + 2)
+                t_mask_b = attention_mask[b].bool()
+                rel_latent_indices = (input_ids[b][t_mask_b] == self.latent_id).nonzero(as_tuple=True)[0]
+                # 注意：generate 使用左补齐，所以还需要加上 diff 偏移
+                curr_L = fused_samples_list[b].size(1)
+                diff = max_fused_L - curr_L
+                latent_positions.append((rel_latent_indices + mol_len_b + diff).tolist())
+            
+            # 在启动生成前，先让模型完成潜空间思考
+            final_embeds = self._apply_latent_feedback(
+                final_embeds, final_attn_mask, latent_positions
+            )
+
+        # 5. 调用生成
         outputs = self.model.generate(
             inputs_embeds=final_embeds,
             attention_mask=final_attn_mask,

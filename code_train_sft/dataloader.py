@@ -15,9 +15,23 @@ from config import ModelConfig
 # --------------------------------
 # Load tokenizer (Qwen decoder-only LM)
 # --------------------------------
-# 使用配置文件中的路径加载 Qwen 模型的 tokenizer
 tokenizer = AutoTokenizer.from_pretrained(ModelConfig.DEFAULT_QWEN_PATH)
 tokenizer.pad_token = tokenizer.eos_token
+
+# 🚨 Coconut 特殊标记
+COCONUT_TOKENS = {
+    "latent": "<latent>",
+    "start_latent": "<start_latent>",
+    "end_latent": "<end_latent>",
+    "mol_start": "<mol_start>",
+    "mol_end": "<mol_end>"
+}
+# 确保所有特殊标记都添加到词表
+tokenizer.add_tokens(list(COCONUT_TOKENS.values()))
+
+LATENT_ID = tokenizer.convert_tokens_to_ids(COCONUT_TOKENS["latent"])
+START_LATENT_ID = tokenizer.convert_tokens_to_ids(COCONUT_TOKENS["start_latent"])
+END_LATENT_ID = tokenizer.convert_tokens_to_ids(COCONUT_TOKENS["end_latent"])
 
 # 最大文本长度（prompt + answer），从配置中读取
 MAX_LEN = ModelConfig.MAX_TEXT_LEN
@@ -66,11 +80,15 @@ def extract_fields(example):
     else:
         cot_dict = cot_content
     
-    # 3. 构造 CoT 字符串
-    cot_lines = []
+    # 3. 构造 CoT 步骤列表 (Coconut 专用)
+    # 每个步骤是一个字符串，例如 "Step 1:\nSMILES: CCC"
+    cot_steps = []
     for i, (k, v) in enumerate(cot_dict.items()):
-        cot_lines.append(f"Step {i+1}:\n{k}: {v}")
-    cot_value = "\n\n".join(cot_lines)
+        if k == "output": continue # output 另外处理
+        cot_steps.append(f"Step {i+1}:\n{k}: {v}")
+    
+    # 为了兼容旧版 SFT，依然保留 cot_value 字符串
+    cot_value = "\n\n".join(cot_steps)
 
     # 4. 提取 label 优先级
     if meta_dict.get("gt"):
@@ -181,11 +199,71 @@ def extract_fields(example):
         "label": f"<answer> {label_value} </answer>",
         # 结构化思维链 (CoT)
         "cot": cot_value,
+        # 分步思维链 (Coconut 专用)
+        "cot_steps": cot_steps,
     }
 
 
 # --------------------------------
-# 2. 构造 Causal LM 的训练样本
+# 2.5 构造 Coconut 训练样本
+# --------------------------------
+def coconut_tokenize(
+    example, 
+    scheduled_stage=0, 
+    c_thought=2, 
+    max_len=ModelConfig.MAX_TEXT_LEN
+):
+    """
+    Coconut 训练的核心数据处理：
+    将前 scheduled_stage 个步骤替换为 (scheduled_stage * c_thought) 个 <latent> tokens。
+    """
+    prompt = example["query"]
+    steps = example["cot_steps"]
+    label = example["label"]
+    
+    # 确定要替换的步数（不能超过总步数）
+    n_skip_steps = min(len(steps), scheduled_stage)
+    n_latent_tokens = n_skip_steps * c_thought
+    
+    # 1. Prompt 部分 Tokenize
+    prompt_ids = tokenizer.encode(f"{prompt}\n\n", add_special_tokens=False)
+    
+    # 2. Latent 部分拼接
+    # 格式：<start_latent> + <latent> * N + <end_latent>
+    latent_ids = [START_LATENT_ID] + [LATENT_ID] * n_latent_tokens + [END_LATENT_ID]
+    
+    # 3. 剩余文本步骤 Tokenize
+    remaining_steps_text = "\n\n".join(steps[n_skip_steps:])
+    if remaining_steps_text:
+        remaining_steps_text += "\n\n"
+    
+    response_text = f"{remaining_steps_text}{label}{tokenizer.eos_token}"
+    response_ids = tokenizer.encode(response_text, add_special_tokens=False)
+    
+    # 4. 全局拼接
+    input_ids = (prompt_ids + latent_ids + response_ids)[:max_len]
+    attention_mask = [1] * len(input_ids)
+    
+    # 5. 构造 labels
+    # Prompt 和 Latent 部分都需要 mask 掉 (-100)
+    # 只有剩余的文本步骤和最后的答案计算 Loss
+    labels = input_ids.copy()
+    mask_len = min(len(prompt_ids) + len(latent_ids), max_len)
+    labels[:mask_len] = [-100] * mask_len
+    
+    # 额外：为了方便 Coconut 模型的迭代 forward，我们需要记录这些 latent token 的位置索引
+    # 虽然 Trainer 会做 padding，但我们在 forward 内部会重新寻找
+    
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+        "smiles": example["input_smiles"],
+    }
+
+
+# --------------------------------
+# 2. 构造 Causal LM 的训练样本 (旧版 SFT 兼容)
 # --------------------------------
 def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
     """
@@ -249,21 +327,26 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
 # --------------------------------
 # 3. 数据集加载与整体处理流程
 # --------------------------------
-def load_data(path, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
+def load_data(
+    path, 
+    include_cot=True, 
+    max_len=ModelConfig.MAX_TEXT_LEN,
+    is_coconut=False,
+    scheduled_stage=0,
+    c_thought=2
+):
     """
     完整的数据加载流程：
     1. 加载原始 ChemCot 数据集
-    2. 提取 query / smiles / label
-    3. 将文本转为 LLM 可训练的 token 格式
+    2. 提取 query / smiles / label / steps
+    3. 将文本转为 LLM 可训练的 token 格式 (支持 SFT 或 Coconut)
     """
 
     # 扫描所有 JSON 文件并排除 rxn/rcr.json
     all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
     data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
     
-    print(f"Loading {len(data_files)} JSON files...")
-    for f in sorted(data_files):
-        print(f" - {os.path.relpath(f, path)}")
+    # print(f"Loading {len(data_files)} JSON files...")
     
     # 加载过滤后的数据文件
     ds = load_dataset("json", data_files=data_files)["train"]
@@ -282,18 +365,32 @@ def load_data(path, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
     dataset = ds.map(
         extract_fields,
         batched=False,
-        remove_columns=ds.column_names  # 移除原始无关字段
+        remove_columns=ds.column_names
     )
 
     # --------------------------------
-    # Step 2: 构造 LLM 训练样本
+    # Step 2: 构造训练样本
     # --------------------------------
-    dataset = dataset.map(
-        llm_tokenize,
-        batched=False,
-        fn_kwargs={"include_cot": include_cot, "max_len": max_len},
-        remove_columns=["query", "input_smiles", "label", "cot"]  # Remove all text fields, keep only tokenized output
-    )
+    if is_coconut:
+        # Coconut 模式
+        dataset = dataset.map(
+            coconut_tokenize,
+            batched=False,
+            fn_kwargs={
+                "scheduled_stage": scheduled_stage, 
+                "c_thought": c_thought, 
+                "max_len": max_len
+            },
+            remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+        )
+    else:
+        # 标准 SFT 模式
+        dataset = dataset.map(
+            llm_tokenize,
+            batched=False,
+                fn_kwargs={"include_cot": include_cot, "max_len": max_len},
+                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+        )
 
     return dataset
 
