@@ -287,6 +287,8 @@ def train_sft_lora(
     # ============================
     # 3. 配置LoRA（如果还没有LoRA）
     # ============================
+    # 无论是否加载了权重，我们都先确保基础模型是冻结的
+    # 这是 PEFT 的标准实践：先全部冻结，再由 PEFT 开启特定层
     if not hasattr(model.model, 'peft_config') or model.model.peft_config is None:
         logger.info("Configuring LoRA from scratch...")
         
@@ -310,13 +312,12 @@ def train_sft_lora(
         model.model = get_peft_model(model.model, lora_config)
     else:
         logger.info("Using existing LoRA configuration")
-        # 确保LoRA参数可训练
-        for param in model.model.parameters():
-            if hasattr(param, 'requires_grad'):
-                param.requires_grad = True
-    
-    # 确保投影器可训练
-    logger.info("Keeping projector trainable...")
+        # 如果是加载的 PeftModel，PEFT 已经在 from_pretrained(..., is_trainable=True) 时处理好了梯度
+        # 我们只需要确保它处于训练模式即可
+        model.model.train()
+
+    # 🚨 关键：只有 Projector 是我们需要手动处理的，因为它不在 LoRA 的管辖范围内
+    logger.info("Ensuring projector is trainable...")
     for param in model.projector.parameters():
         param.requires_grad = True
     
