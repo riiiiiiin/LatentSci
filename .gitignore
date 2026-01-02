@@ -38,3 +38,7 @@ Thumbs.db
 
 # 其他临时文件
 *.log
+
+# 忽略任何目录下以 output 开头的文件夹
+**/output*/
+

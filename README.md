@@ -71,6 +71,7 @@ accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
   --include_cot false \
   --output_dir ./outputs/stage1_no_cot \
   --batch_size 2 \
+  --grad_accum 1 \
   --epochs 3
 
 accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
@@ -82,15 +83,6 @@ accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
   --batch_size 2 \
   --epochs 3
 
-🏋️ Training sft_cot
-
-python train_sft_stage2.py \
-  --mode cotinue \
-  --data_path chemcotbench-cot \
-  --model_path ./qwen3_mol_sft_lora_results \
-  --batch_size 2 \
-  --max_seq_length 1024 \
-  --epochs 3
 
 
 

@@ -188,6 +188,7 @@ def train_sft_lora(
     batch_size=32,
     lr=2e-4,
     max_seq_length=8192,
+    grad_accum=1,  # 新增：梯度累积步数
     resume_from_checkpoint=None,  # 新增：从检查点恢复训练
     lora_weights_path=None,  # 新增：预训练的LoRA权重路径
     projector_path=None,  # 新增：预训练的投影器权重路径
@@ -343,7 +344,7 @@ def train_sft_lora(
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=grad_accum,
         learning_rate=lr,
         bf16=True,
         max_seq_length=max_seq_length,
@@ -859,6 +860,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default=ModelConfig.DEFAULT_OUTPUT_DIR, help="保存/加载模型的路径")
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH, help="数据路径")
     parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
+    parser.add_argument("--grad_accum", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--max_seq_length", type=int, default=8192, help="最大序列长度")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
     parser.add_argument("--include_cot", type=lambda x: (str(x).lower() == 'true'), default=True, help="是否在 Response 中包含思维链 (CoT)")
@@ -901,6 +903,7 @@ if __name__ == "__main__":
             data_path=args.data_path,
             output_dir=args.output_dir,
             batch_size=args.batch_size,
+            grad_accum=args.grad_accum,
             max_seq_length=args.max_seq_length,
             epochs=args.epochs,
             lora_weights_path=args.lora_path,
