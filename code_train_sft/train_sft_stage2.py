@@ -354,8 +354,8 @@ def train_sft_lora(
         remove_unused_columns=False,
         logging_steps=10,
         eval_strategy="no", # 不做划分，直接全部训练
-        save_steps=100,
-        save_total_limit=3,
+        save_strategy="no", # 🚨 不保存中间检查点，节省空间
+        save_total_limit=1,
         gradient_checkpointing=True, # 🚨 针对 8192 长度默认开启，防止 OOM
         max_grad_norm=0.3,
         warmup_ratio=0.1,
