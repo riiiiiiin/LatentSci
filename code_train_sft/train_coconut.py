@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 def train_coconut():
     parser = argparse.ArgumentParser(description="Coconut Training for Bio-LatentCOT")
     parser.add_argument("--data_path", type=str, default="/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot")
-    parser.add_argument("--lora_path", type=str, required=True, help="Stage 2 LoRA weights")
-    parser.add_argument("--projector_path", type=str, required=True, help="Stage 2 Projector weights")
+    parser.add_argument("--lora_path", type=str, default=None, help="Stage 2 LoRA weights (optional)")
+    parser.add_argument("--projector_path", type=str, default=None, help="Stage 2 Projector weights (optional)")
     parser.add_argument("--output_dir", type=str, default="./outputs/stage3_coconut")
     parser.add_argument("--epochs_per_stage", type=int, default=3, help="How many epochs per latent stage")
     parser.add_argument("--max_latent_stage", type=int, default=3, help="Max number of CoT steps to latent-ize")
@@ -58,13 +58,33 @@ def train_coconut():
         model = Qwen3MoleculeLLM(qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH, mol_config=mol_config)
         tokenizer = model.tokenizer
         
-        # 加载上一个 Stage 的权重
-        model = load_trained_components(model, lora_weights_path=current_lora_path, projector_path=current_projector_path)
+        # 加载上一个 Stage 的权重（如果存在）
+        if current_lora_path or current_projector_path:
+            logger.info(f"Loading weights for stage {stage}...")
+            model = load_trained_components(model, lora_weights_path=current_lora_path, projector_path=current_projector_path)
         
-        # 确保梯度开启
-        model.model.train()
+        # 确保 LoRA 已配置
+        if not hasattr(model.model, 'peft_config') or model.model.peft_config is None:
+            logger.info("Configuring LoRA from scratch...")
+            # 首先冻结所有参数
+            for param in model.parameters():
+                param.requires_grad = False
+            
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.1,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                bias="none",
+            )
+            model.model = get_peft_model(model.model, lora_config)
+        
+        # 确保投影器可训练
         for param in model.projector.parameters():
             param.requires_grad = True
+        
+        model.model.train()
 
         # 2.2 重新加载当前 Stage 的数据集
         train_dataset = load_data(

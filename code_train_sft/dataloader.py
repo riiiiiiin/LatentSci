@@ -385,12 +385,12 @@ def load_data(
         )
     else:
         # 标准 SFT 模式
-        dataset = dataset.map(
-            llm_tokenize,
-            batched=False,
+    dataset = dataset.map(
+        llm_tokenize,
+        batched=False,
             fn_kwargs={"include_cot": include_cot, "max_len": max_len},
             remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
-        )
+    )
 
     return dataset
 
