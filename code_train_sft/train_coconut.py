@@ -108,7 +108,8 @@ def train_coconut():
             max_seq_length=args.max_seq_length,
             remove_unused_columns=False,
             logging_steps=10,
-            save_steps=100,
+            save_strategy="no", # 🚨 不保存中间检查点，节省空间
+            save_total_limit=1,
             gradient_checkpointing=True,
             # 🚨 修复 DDP 错误：使用非重入式 checkpoint 并允许查找未使用参数
             gradient_checkpointing_kwargs={"use_reentrant": False},
