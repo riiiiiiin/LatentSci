@@ -6,7 +6,7 @@ from transformers import (
     TrainerCallback, 
     DataCollatorForSeq2Seq
 )
-from dataloader import load_data
+from dataloader import load_data, extract_fields, llm_tokenize, coconut_tokenize
 from model_new import Qwen3MoleculeLLM
 import os
 import time
@@ -642,62 +642,30 @@ def load_lora_model_for_inference(
     
     return model, tokenizer
 
+# ------------------------------
+# 以下为 inference / eval 相关替换部分
+# ------------------------------
 
-# 加载测试数据
-def load_test_data(test_data_path):
+def load_test_data(test_data_path, max_len=None):
     """
-    从JSON文件加载测试数据
-    
-    Args:
-        test_data_path: 测试数据路径（可以是文件或目录）
-    
-    Returns:
-        test_cases: 测试用例列表，每个元素包含 {smiles, query, label (if available), cot (if available)}
+    使用 dataloader.load_data 的 eval_mode 接口加载测试/验证数据（tokenized, labels=None）。
+
+    如果 test_data_path 为目录：直接调用 load_data(path, eval_mode=True)
+    如果 test_data_path 为单个文件：局部使用 load_dataset -> extract_fields(is_eval=True) -> llm_tokenize/coconut_tokenize 进行处理
     """
-    import glob
-    from datasets import load_dataset
-    
-    logger.info(f"Loading test data from: {test_data_path}")
-    
-    # 判断是文件还是目录
-    if os.path.isfile(test_data_path):
-        data_files = [test_data_path]
-    elif os.path.isdir(test_data_path):
-        # 扫描所有 JSON 文件并排除 rxn/rcr.json
-        all_json_files = glob.glob(os.path.join(test_data_path, "**/*.json"), recursive=True)
-        data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
-    else:
-        raise ValueError(f"Test data path not found: {test_data_path}")
-    
-    logger.info(f"Found {len(data_files)} test files:")
-    for f in sorted(data_files):
-        logger.info(f"  - {f}")
-    
-    # 加载数据
-    ds = load_dataset("json", data_files=data_files)["train"]
-    
-    # 提取字段（使用 dataloader 中的 extract_fields 函数）
-    from dataloader import extract_fields
-    test_cases = []
-    
-    for example in ds:
-        try:
-            processed = extract_fields(example)
-            test_cases.append({
-                "smiles": processed["input_smiles"],
-                "query": processed["query"],
-                "label": processed.get("label", None),
-                "cot": processed.get("cot", None)
-            })
-        except Exception as e:
-            logger.warning(f"Failed to process test example: {e}")
-            continue
-    
-    logger.info(f"Loaded {len(test_cases)} test cases")
-    return test_cases
 
+    if max_len is None:
+        max_len = ModelConfig.MAX_TEXT_LEN
 
-# 推理测试函数
+    logger.info(f"Loading test/eval data from: {test_data_path} (eval_mode=True)")
+
+    # 情况1：目录（推荐）
+    if os.path.isdir(test_data_path):
+        # 直接使用 load_data 的 eval_mode
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, exclude_tasks=['rcr', 'mechsel'], max_len=max_len)
+        logger.info(f"Loaded tokenized eval dataset from dir: {len(dataset)} examples")
+        return dataset
+    
 def run_inference_on_test_data(
     model,
     tokenizer,
@@ -708,68 +676,51 @@ def run_inference_on_test_data(
     device="cuda" if torch.cuda.is_available() else "cpu",
     save_results_path=None,
     batch_size=1,
-    max_samples=None
+    max_samples=None,
+    tokenization_max_len=None
 ):
     """
-    在测试数据上运行推理
-    
-    Args:
-        model: 加载的模型
-        tokenizer: 分词器
-        test_data_path: 测试数据路径（文件或目录）
-        max_new_tokens: 最大生成token数
-        temperature: 温度参数
-        top_p: top-p采样参数
-        device: 设备
-        save_results_path: 保存结果的文件路径
-        batch_size: 批次大小（当前仅支持1）
-        max_samples: 最大测试样本数（None表示全部测试）
-    
-    Returns:
-        results: 推理结果列表
+    基于 load_data(..., eval_mode=True) 的推理流程。
+
+    说明：
+      - 该函数会调用 load_test_data(...) 获取已经 tokenized 的 eval 数据（labels 为 None）。
+      - 目前实现以 sample-level (batch_size=1) 推理为主，保持逻辑简洁稳定。
     """
     logger.info(f"Running inference on test data from {test_data_path}")
     logger.info(f"Device: {device}, Max new tokens: {max_new_tokens}")
-    
-    # 加载测试数据
-    test_cases = load_test_data(test_data_path)
-    
-    # 限制测试样本数
-    if max_samples is not None and max_samples < len(test_cases):
-        logger.info(f"Limiting test to first {max_samples} samples")
-        test_cases = test_cases[:max_samples]
-    
+
+    # 加载并 tokenized 的 eval dataset
+    dataset = load_test_data(test_data_path, max_len=tokenization_max_len)
+
+    # 限制样本数量
+    if max_samples is not None and max_samples < len(dataset):
+        dataset = dataset.select(range(max_samples))
+
+    logger.info(f"Number of eval samples to run: {len(dataset)}")
+
     # 确保模型在正确设备上
     model.eval()
     model = model.to(device)
-    
+
     results = []
-    
-    # 逐个样本推理
-    for idx, test_case in enumerate(test_cases):
+
+    # 逐样本推理（保持原有逐个样本日志/错误捕获）
+    for idx in range(len(dataset)):
+        item = dataset[idx]  # 已包含: input_ids (list[int]), attention_mask (list[int]), labels (None), smiles (list[str])
         logger.info(f"\n{'='*60}")
-        logger.info(f"Processing sample {idx+1}/{len(test_cases)}")
-        logger.info(f"Input SMILES: {test_case['smiles']}")
-        logger.info(f"Input query: {test_case['query'][:200]}...")  # 显示前200字符
-        
+        logger.info(f"Processing sample {idx+1}/{len(dataset)}")
+
         try:
-            # 清理SMILES（移除点号分隔符）
-            cleaned_smiles = [s.replace(".", "").strip() for s in test_case['smiles']]
-            
-            # 编码提示文本
-            encodings = tokenizer(
-                test_case['query'],
-                padding=True,
-                truncation=True,
-                max_length=2048,
-                return_tensors="pt"
-            )
-            
-            # 确保所有输入在相同设备上
-            input_ids = encodings["input_ids"].to(device)
-            attention_mask = encodings["attention_mask"].to(device)
-            
-            # 生成回复
+            smiles_list = item.get("smiles", []) or []
+            logger.info(f"Input SMILES: {smiles_list}")
+            # 清理 SMILES（去掉点）
+            cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
+
+            # 构造 tensor inputs（单样本）
+            input_ids = torch.tensor(item["input_ids"], dtype=torch.long).unsqueeze(0).to(device)
+            attention_mask = torch.tensor(item["attention_mask"], dtype=torch.long).unsqueeze(0).to(device)
+
+            # 生成
             with torch.no_grad():
                 generated_ids = model.generate(
                     smiles_list=[cleaned_smiles],
@@ -780,49 +731,53 @@ def run_inference_on_test_data(
                     top_p=top_p,
                     do_sample=True if temperature > 0 else False,
                 )
-            
-            # 解码结果
-            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            
-            logger.info(f"Generated response: {generated_text[:200]}...")  # 显示前200字符
-            
-            # 保存结果
+
+            # 兼容返回类型（tensor / list）
+            if isinstance(generated_ids, torch.Tensor):
+                gen0 = generated_ids[0]
+            else:
+                # 可能是 list of tensors
+                gen0 = generated_ids[0]
+
+            generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
+
+            logger.info(f"Generated response: {generated_text[:200]}...")
+
             result = {
                 "sample_id": idx,
-                "smiles": test_case['smiles'],
-                "query": test_case['query'],
+                "smiles": smiles_list,
                 "generated_response": generated_text.strip(),
-                "ground_truth_label": test_case.get('label', None),
-                "ground_truth_cot": test_case.get('cot', None)
+                # eval 模式下 ground truth 已为 None（或原数据中存在时仍可访问）
+                "ground_truth_label": None,
+                "ground_truth_cot": None,
+                "task": item.get("task", None)
             }
             results.append(result)
-            
+
         except Exception as e:
             logger.error(f"Error processing sample {idx}: {e}")
             import traceback
             logger.error(traceback.format_exc())
             results.append({
                 "sample_id": idx,
-                "smiles": test_case['smiles'],
-                "query": test_case['query'],
+                "smiles": item.get("smiles", []),
                 "generated_response": None,
                 "error": str(e),
-                "ground_truth_label": test_case.get('label', None),
-                "ground_truth_cot": test_case.get('cot', None)
+                "ground_truth_label": None,
+                "ground_truth_cot": None,
+                "task": item.get("task", None)
             })
-        
-        # 清理GPU缓存
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    
+
     logger.info(f"\n{'='*60}")
     logger.info(f"Inference completed on {len(results)} samples")
-    
-    # 保存结果
+
+    # 保存结果（保持原有结构）
     if save_results_path:
         from datetime import datetime
-        
-        # 准备保存的数据
+
         save_data = {
             "timestamp": datetime.now().isoformat(),
             "test_data_path": test_data_path,
@@ -839,23 +794,19 @@ def run_inference_on_test_data(
             "num_samples": len(results),
             "test_results": results
         }
-        
-        # 确保目录存在
+
         os.makedirs(os.path.dirname(save_results_path) if os.path.dirname(save_results_path) else ".", exist_ok=True)
-        
-        # 保存到JSON文件
         with open(save_results_path, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Results saved to: {save_results_path}")
-    
-    return results
 
+        logger.info(f"Results saved to: {save_results_path}")
+
+    return results
 
 # 主函数 - 修改以支持第二轮训练
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="LoRA微调多模态分子-语言模型")
     parser.add_argument("--mode", type=str, choices=["train", "inference"], default="train", help="运行模式")
     parser.add_argument("--output_dir", type=str, default=ModelConfig.DEFAULT_OUTPUT_DIR, help="保存/加载模型的路径")
@@ -865,21 +816,21 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_length", type=int, default=8192, help="最大序列长度")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
     parser.add_argument("--include_cot", type=lambda x: (str(x).lower() == 'true'), default=True, help="是否在 Response 中包含思维链 (CoT)")
-    
+
     # 权重加载参数
     parser.add_argument("--lora_path", type=str, default=None, help="预训练 LoRA 权重路径")
     parser.add_argument("--projector_path", type=str, default=None, help="预训练投影器权重路径")
-    
+
     # 分子模型超参数
     parser.add_argument("--num_queries", type=int, default=ModelConfig.NUM_QUERIES, help="投影器查询向量数量")
     parser.add_argument("--mol_input_dim", type=int, default=ModelConfig.INPUT_DIM, help="分子编码器输出维度")
     parser.add_argument("--mol_num_heads", type=int, default=ModelConfig.NUM_HEADS, help="投影器注意力头数")
-    
+
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--wandb_project", type=str, default="qwen3-molecule-lora-sft", help="wandb项目名称")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="wandb运行名称")
     parser.add_argument("--wandb_entity", type=str, default=None, help="wandb团队/实体名称")
-    
+
     # 推理模式参数
     parser.add_argument("--test_data_path", type=str, default=None, help="测试数据路径（用于inference模式）")
     parser.add_argument("--max_new_tokens", type=int, default=2048, help="生成的最大token数（用于inference模式）")
@@ -887,16 +838,16 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=0.9, help="top-p采样参数（用于inference模式）")
     parser.add_argument("--max_test_samples", type=int, default=None, help="最大测试样本数，None表示全部测试（用于inference模式）")
     parser.add_argument("--inference_results_path", type=str, default=None, help="推理结果保存路径（用于inference模式）")
-    
+
     args = parser.parse_args()
-    
+
     # 构建分子配置字典
     mol_config = {
         'num_queries': args.num_queries,
         'input_dim': args.mol_input_dim,
         'num_heads': args.mol_num_heads
     }
-    
+
     if args.mode == "train":
         # 统一训练入口
         logger.info(f"Starting training mode...")
@@ -917,19 +868,19 @@ if __name__ == "__main__":
             include_cot=args.include_cot,
         )
         logger.info("Training completed!")
-    
+
     elif args.mode == "inference":
         # 推理模式
         logger.info(f"Starting inference mode...")
         # 如果没有指定 lora_path，默认从 output_dir 寻找
         lora_path = args.lora_path or os.path.join(args.output_dir, "lora_weights")
         projector_path = args.projector_path or os.path.join(args.output_dir, "projector.pt")
-        
+
         # 确定测试数据路径
         test_data_path = args.test_data_path or args.data_path
         if not test_data_path:
             raise ValueError("Please specify test data path using --test_data_path or --data_path")
-        
+
         # 确定结果保存路径
         if args.inference_results_path:
             results_path = args.inference_results_path
@@ -937,15 +888,15 @@ if __name__ == "__main__":
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
-        
+
         model, tokenizer = load_lora_model_for_inference(
-            base_model_path=None, 
+            base_model_path=None,
             lora_weights_path=lora_path,
             projector_path=projector_path,
             mol_config=mol_config
         )
-        
-        # 在测试数据上运行推理
+
+        # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
         run_inference_on_test_data(
             model=model,
             tokenizer=tokenizer,
@@ -954,7 +905,8 @@ if __name__ == "__main__":
             temperature=args.temperature,
             top_p=args.top_p,
             save_results_path=results_path,
-            max_samples=args.max_test_samples
+            max_samples=args.max_test_samples,
+            tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN)
         )
-        
+
         logger.info("Inference completed!")
