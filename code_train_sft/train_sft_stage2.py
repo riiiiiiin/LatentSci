@@ -197,6 +197,7 @@ def train_sft_lora(
     wandb_entity=None,
     mol_config=None,  # 新增：显式传入分子配置
     include_cot=True, # 新增：是否包含 CoT
+    save_full_model=False, # 新增：是否保存完整模型权重
 ):
     """
     使用LoRA进行SFT训练，支持从预训练权重继续训练
@@ -464,8 +465,12 @@ def train_sft_lora(
         # ============================
         logger.info("Saving models...")
         
-        # 保存完整的模型
-        trainer.save_model(output_dir)
+        # 保存完整的模型（根据需要）
+        if save_full_model:
+            logger.info("Saving full model weights...")
+            trainer.save_model(output_dir)
+        else:
+            logger.info("Skipping full model weights saving (only saving LoRA and Projector).")
         
         # 单独保存LoRA适配器权重
         lora_weights_path_save = os.path.join(output_dir, "lora_weights")
@@ -477,9 +482,6 @@ def train_sft_lora(
         projector_path_save = os.path.join(output_dir, "projector.pt")
         torch.save(model.projector.state_dict(), projector_path_save)
         logger.info(f"Projector weights saved to: {projector_path_save}")
-        
-        # 保存分词器
-        tokenizer.save_pretrained(output_dir)
         
         # 保存训练配置
         config_save_path = os.path.join(output_dir, "training_config.json")
@@ -494,7 +496,8 @@ def train_sft_lora(
             "pretrained_lora": lora_weights_path,
             "pretrained_projector": projector_path,
             "training_time_seconds": training_time,
-            "training_stage": "second_stage" if (resume_from_checkpoint or lora_weights_path) else "first_stage"
+            "training_stage": "second_stage" if (resume_from_checkpoint or lora_weights_path) else "first_stage",
+            "save_full_model": save_full_model
         }
         with open(config_save_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
@@ -509,42 +512,43 @@ def train_sft_lora(
             wandb.log_artifact(artifact)
         
         # ============================
-        # 10. 合并LoRA权重（可选）
+        # 10. 合并LoRA权重（根据需要）
         # ============================
-        logger.info("Merging LoRA weights with base model...")
-        try:
-            merged_model = model.model.merge_and_unload()
-            
-            merged_model_path = os.path.join(output_dir, "merged_model")
-            os.makedirs(merged_model_path, exist_ok=True)
-            
-            merged_model.save_pretrained(merged_model_path)
-            tokenizer.save_pretrained(merged_model_path)
-            
-            torch.save(model.projector.state_dict(), os.path.join(merged_model_path, "projector.pt"))
-            
-            logger.info(f"Merged model saved to: {merged_model_path}")
-            
-            if wandb.run is not None:
-                lora_artifact = wandb.Artifact(
-                    name=f"lora-weights-{wandb_run_name}",
-                    type="model",
-                    description="LoRA adapter weights"
-                )
-                lora_artifact.add_dir(lora_weights_path_save)
-                wandb.log_artifact(lora_artifact)
+        if save_full_model:
+            logger.info("Merging LoRA weights with base model...")
+            try:
+                merged_model = model.model.merge_and_unload()
                 
-                model_artifact = wandb.Artifact(
-                    name=f"full-model-{wandb_run_name}",
-                    type="model",
-                    description="Full model with merged LoRA weights"
-                )
-                model_artifact.add_dir(merged_model_path)
-                wandb.log_artifact(model_artifact)
-            
-        except Exception as e:
-            logger.warning(f"Failed to merge LoRA weights: {e}")
-            logger.warning("Using unmerged model for inference")
+                merged_model_path = os.path.join(output_dir, "merged_model")
+                os.makedirs(merged_model_path, exist_ok=True)
+                
+                merged_model.save_pretrained(merged_model_path)
+                tokenizer.save_pretrained(merged_model_path)
+                
+                torch.save(model.projector.state_dict(), os.path.join(merged_model_path, "projector.pt"))
+                
+                logger.info(f"Merged model saved to: {merged_model_path}")
+                
+                if wandb.run is not None:
+                    model_artifact = wandb.Artifact(
+                        name=f"full-model-{wandb_run_name}",
+                        type="model",
+                        description="Full model with merged LoRA weights"
+                    )
+                    model_artifact.add_dir(merged_model_path)
+                    wandb.log_artifact(model_artifact)
+                
+            except Exception as e:
+                logger.warning(f"Failed to merge LoRA weights: {e}")
+        
+        if wandb.run is not None:
+            lora_artifact = wandb.Artifact(
+                name=f"lora-weights-{wandb_run_name}",
+                type="model",
+                description="LoRA adapter weights"
+            )
+            lora_artifact.add_dir(lora_weights_path_save)
+            wandb.log_artifact(lora_artifact)
 
         # 完成wandb运行
         if wandb.run is not None:
@@ -865,6 +869,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_length", type=int, default=8192, help="最大序列长度")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
     parser.add_argument("--include_cot", type=lambda x: (str(x).lower() == 'true'), default=True, help="是否在 Response 中包含思维链 (CoT)")
+    parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="是否保存完整模型权重 (默认 False 以节省空间)")
     
     # 权重加载参数
     parser.add_argument("--lora_path", type=str, default=None, help="预训练 LoRA 权重路径")
@@ -915,6 +920,7 @@ if __name__ == "__main__":
             wandb_entity=args.wandb_entity,
             mol_config=mol_config,
             include_cot=args.include_cot,
+            save_full_model=args.save_full_model,
         )
         logger.info("Training completed!")
     
