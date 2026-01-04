@@ -299,7 +299,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         增强版前向传播：支持分子证据精炼与逆向干扰
         """
         smiles_list = kwargs.pop("smiles", None)
-        counterfactual_prob = kwargs.pop("counterfactual_prob", 0.0) # 逆向干扰概率
+        do_perturb = kwargs.pop("do_perturb", False) # 是否执行逆向干扰 (Counterfactual perturbation)
 
         if smiles_list is None:
             raise ValueError("必须提供smiles参数")
@@ -366,15 +366,16 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 m_feat = flat_feats_llm[cursor].unsqueeze(0) # [1, num_queries, d_llm]
                 
                 # --- Stage 3: Counterfactual Bio Latent Dropout ---
-                if self.training and counterfactual_prob > 0 and torch.rand(1).item() < counterfactual_prob:
-                    # 随机干扰
+                if self.training and do_perturb:
+                    # 随机干扰：Dropout, Shuffle, Noise
                     noise_type = torch.randint(0, 3, (1,)).item()
                     if noise_type == 0:
                         m_feat = torch.zeros_like(m_feat) # Dropout
                     elif noise_type == 1:
+                        # Shuffle across the query tokens
                         idx = torch.randperm(m_feat.size(1))
                         m_feat = m_feat[:, idx, :] # Shuffle
-                    else:
+                    elif noise_type == 2:
                         m_feat = m_feat + torch.randn_like(m_feat) * 0.05 # Noise
 
                 m_with_tags = torch.cat([start_emb, m_feat, end_emb], dim=1) # [1, num_queries+2, d_llm]

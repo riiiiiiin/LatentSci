@@ -17,6 +17,8 @@ import plotext as plt
 from config import ModelConfig
 from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
+import torch.nn.functional as F
+import random
 
 
 # 设置日志
@@ -120,6 +122,19 @@ class MultiModalDataCollator(DataCollatorForSeq2Seq):
 
 # 自定义 SFTTrainer 以支持多模态序列长度变化
 class MultiModalSFTTrainer(SFTTrainer):
+    def __init__(
+        self,
+        *args,
+        cf_lambda: float = 0.0,
+        cf_margin: float = 0.5,
+        cf_prob: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.cf_lambda = float(cf_lambda)
+        self.cf_margin = float(cf_margin)
+        self.cf_prob = float(cf_prob)
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
         重写 compute_loss。
@@ -129,15 +144,40 @@ class MultiModalSFTTrainer(SFTTrainer):
         
         注意：模型内部已经计算了正确的平均 Loss，这里直接返回即可。
         """
-        if return_outputs:
-            loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
-            return loss, outputs
-        
-        # 直接调用模型前向传播获取内部计算好的 Loss
-        outputs = model(**inputs)
-        
-        # 模型已经返回正确的平均 Loss，直接使用
-        return outputs.loss
+        # --- Clean forward pass (no perturbation) ---
+        outputs_pos = model(**inputs, do_perturb=False)
+        loss_pos = outputs_pos.loss
+
+        # Optionally enable counterfactual loss (paired pass)
+        do_cf = (
+            (self.cf_lambda is not None and self.cf_lambda > 0.0)
+            and (random.random() < self.cf_prob)
+        )
+
+        if not do_cf:
+            return (loss_pos, outputs_pos) if return_outputs else loss_pos
+
+        # --- Corrupted forward pass ---
+        outputs_cf = model(**inputs, do_perturb=True)
+        loss_cf = outputs_cf.loss
+
+        # Hinge on CE gap: enforce L_cf - L_pos >= margin
+        gap = loss_cf - loss_pos
+        loss_cf_term = F.relu(self.cf_margin - gap)
+        loss_total = loss_pos + (self.cf_lambda * loss_cf_term)
+
+        # Logging (avoid duplicated logs in DDP)
+        if getattr(self, "is_world_process_zero", False) and wandb.run is not None:
+            log_dict = {
+                "loss_pos": loss_pos.detach().float().item(),
+                "loss_cf": loss_cf.detach().float().item(),
+                "cf_gap": gap.detach().float().item(),
+                "loss_cf_term": loss_cf_term.detach().float().item(),
+                "loss_total": loss_total.detach().float().item(),
+            }
+            wandb.log(log_dict)
+
+        return (loss_total, outputs_pos) if return_outputs else loss_total
 
 # 加载已训练的模型组件
 def load_trained_components(
