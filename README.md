@@ -84,10 +84,10 @@ accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
   --batch_size 2 \
   --epochs 3
 
-accelerate launch --multi_gpu --num_processes 2 train_coconut.py \
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
   --lora_path ./outputs/stage2_with_cot/lora_weights \
   --projector_path ./outputs/stage2_with_cot/projector.pt \
-  --output_dir ./outputs/coconut \
+  --output_dir ./outputs/stage3 \
   --epochs_per_stage 3 \
   --max_latent_stage 7 \
   --c_thought 2
