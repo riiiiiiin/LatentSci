@@ -199,7 +199,8 @@ def extract_fields(example, is_eval: bool = False):
             "label": None,
             "cot": None,
             "cot_steps": None,
-            "task": task
+            "task": task,
+            "id": example["id"]
         }
 
     return {
@@ -213,7 +214,8 @@ def extract_fields(example, is_eval: bool = False):
         "cot": cot_value,
         # 分步思维链 (Coconut 专用)
         "cot_steps": cot_steps,
-        "task": task
+        "task": task,
+        "id": example["id"]
     }
 
 
