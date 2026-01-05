@@ -31,25 +31,26 @@ def _combine_list(raw):
         raw = '.'.join(raw)
     return raw
 
-def evaluate_mol(model_name: str, subtask: str, log_dir: str = None):
+def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir: str = None):
     if log_dir is None:
         log_dir = f"logs/{subtask}"
     
     if not os.path.exists(log_dir):
         raise ValueError(f"logs_dir {log_dir} is not correct")
     samples = read_json(f"{log_dir}/{model_name}.json")
+    gt_raw = read_json(f'{gt_path}/{subtask}.json')
     preds = []
     gts = []
-    for sample in samples:
-        gt = sample['gt']
+    for i, sample in enumerate(samples):
+        gt = gt_raw[i]['gt']
         if subtask in ['major_product', 'byproduct']:
             gt = json.loads(gt)
             gts.append(gt.get(subtask_to_result_key[subtask], ''))
-        elif subtask == 'retro':
-            if len(gt) == 0:
-                continue
-            gt = _combine_list(gt)
-            gts.append(gt)
+        # elif subtask == 'retro':
+        #     if len(gt) == 0:
+        #         continue
+        #     gt = _combine_list(gt)
+        #     gts.append(gt)
         else:
             gts.append(gt)
 
@@ -66,7 +67,7 @@ def evaluate_mol(model_name: str, subtask: str, log_dir: str = None):
         
     return res
 
-def evaluate_MechSel(model_name: str, logs_dir: str = 'logs/mechsel'):
+def evaluate_MechSel(model_name: str, gt_path, logs_dir: str = 'logs/mechsel'):
     """
     Evaluate the reaction mechanism selection prediction.
 
@@ -80,10 +81,11 @@ def evaluate_MechSel(model_name: str, logs_dir: str = 'logs/mechsel'):
     if not os.path.exists(logs_dir):
         raise ValueError(f"logs_dir {logs_dir} is not correct")
     samples = read_json(f"{logs_dir}/{model_name}.json")
+    gt_raw = read_json(f'{gt_path}/mechsel.json')
 
     preds = []
     gts = []
-    for sample in samples:
+    for i, sample in enumerate(samples):
         pred_choice = extract_answer(sample['result'])
         preds.append(pred_choice)
         # if pred_choice is not a valid choice, we treat it as empty
@@ -91,25 +93,25 @@ def evaluate_MechSel(model_name: str, logs_dir: str = 'logs/mechsel'):
             pred_choice = ""
 
         pred_choice = pred_choice.lower()
-        gt = sample['gt'].lower()
+        gt = gt_raw[i]['gt'].lower()
         preds.append(pred_choice)
         gts.append(gt)
 
     accuracy = sum(1 for pred, gt in zip(preds, gts) if pred == gt) / len(gts)
     return {"MCQ Accuracy (mean)": accuracy}
 
-def evaluate_rxn_score(model_name: str, logs_dir: str = 'logs'):
+def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str = 'logs'):
     all_results = {}
     subtasks = subtask_to_result_key.keys()
     for subtask in subtasks:
         logger.info(f'evaluating {subtask} for model {model_name}')
         try:
             if subtask == 'MechSel' or subtask == 'mechsel':
-                all_results[subtask] = evaluate_MechSel(model_name)
+                all_results[subtask] = evaluate_MechSel(model_name, gt_path)
             elif subtask in ['major_product', 'byproduct']:
-                all_results[subtask] = evaluate_mol(model_name, subtask, f"{logs_dir}/fs")
+                all_results[subtask] = evaluate_mol(model_name, subtask, gt_path, f"{logs_dir}/fs")
             else:
-                all_results[subtask] = evaluate_mol(model_name, subtask)
+                all_results[subtask] = evaluate_mol(model_name, subtask, gt_path)
         except Exception as e:
             logger.error(f"Error evaluating {subtask} for {model_name}: {e}")
             all_results[subtask] = None

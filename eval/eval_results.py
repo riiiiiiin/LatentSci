@@ -10,18 +10,20 @@ import json
 parser = ArgumentParser()
 parser.add_argument('--result_path', type=str, required=True)
 parser.add_argument('--log_name', type=str, required=True)
+parser.add_argument('--dataset_path', type=str, required=True)
 args = parser.parse_args()
 
 result_path = args.result_path
 log_name = args.log_name
+dataset_path = args.dataset_path
 
 os.makedirs("./logs", exist_ok=True)
 build_grouped_save_data(result_path, "./logs", log_name)
 
-moledit_results = evaluate_moledit_score(log_name)
-molopt_results = evaluate_molopt_score(log_name)
-molund_results = evaluate_molund_score(log_name)
-rxn_results = evaluate_rxn_score(log_name)
+moledit_results = evaluate_moledit_score(log_name, f'{dataset_path}/mol_edit')
+molopt_results = evaluate_molopt_score(log_name, f'{dataset_path}/mol_opt')
+molund_results = evaluate_molund_score(log_name, f'{dataset_path}/mol_und')
+rxn_results = evaluate_rxn_score(log_name, f'{dataset_path}/mol_rxn')
 
 all_results = {
     'moledit': moledit_results,

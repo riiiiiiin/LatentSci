@@ -7,9 +7,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
-def evaluate_molund_score(model_name):
+def evaluate_molund_score(model_name, gt_path):
     task_dict = dict(
-        fg_samples="fg_samples", murcko='Murcko_scaffold', ring_count='ring_count',
+        fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',
         ring_system='ring_system_scaffold', equivalence = 'equivalence'
     )
     gt_key_dict = dict(
@@ -26,15 +26,17 @@ def evaluate_molund_score(model_name):
         pred_results = json.load(open(file_name, "r"))
         invalid_number = 0
         
+        gt_name = f"{gt_path}/{task_dict[task]}.json"
+        gts = json.load(open(gt_name, "r"))
+        
         pred_list, gt_list = list(), list()
-        for pred in pred_results:
+        for i, pred in enumerate(pred_results):
             answer = extract_answer(pred['result'])
             if answer is None:
                 invalid_number += 1
                 continue
             pred_list.append(answer)
-            if gt_key_dict[task] != "":
-                gt_list.append(pred[gt_key_dict[task]])
+            gt_list.append(gts[i]['gt'])
         
         assert len(pred_results) == invalid_number+len(pred_list)
         result_dict[task] = eval_molund_from_list(gt_list=gt_list, pred_list=pred_list, total_number=len(pred_results), task=task)

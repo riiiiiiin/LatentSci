@@ -6,7 +6,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-def evaluate_molopt_score(model_name=None):
+def evaluate_molopt_score(model_name, gt_path):
     ## 在get_molopt_cot中得到test结果, 我们评测这些test结果
     prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
     # prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', gsk='gsk3b')
@@ -18,21 +18,23 @@ def evaluate_molopt_score(model_name=None):
         file_name = f"logs/{prop}/{model_name}.json"
         pred_results = json.load(open(file_name, "r"))
         
+                
+        gt_name = f"{gt_path}/{prop}.json"
+        gts = json.load(open(gt_name, "r"))
+        
         tgt_smiles_list, src_smiles_list = list(), list()
         
         invalid_number = 0
         
-        if model_name not in ['biomedgpt', 'biomistral']:
-            src_smiles_key =  'src_smiles'
-        else: src_smiles_key = "src"
-        
-        for pred in pred_results:
+        for i, pred in enumerate(pred_results):
             answer = extract_answer(pred['result'])
             if answer is None:
                 invalid_number += 1
                 continue
             tgt_smiles_list.append(answer)
-            src_smiles_list.append(pred[src_smiles_key])
+            gt = gts[i]
+            meta = json.loads(gt['meta'])
+            src_smiles_list.append(meta['molecule'])
         
         logger.debug(len(pred_results), invalid_number, len(src_smiles_list))
         assert len(src_smiles_list) == len(tgt_smiles_list)
