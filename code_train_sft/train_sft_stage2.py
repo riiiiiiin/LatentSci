@@ -717,7 +717,7 @@ def run_inference_on_test_data(
             logger.debug(f"proc{proc_index} - " + " ".join(map(str, args)))
 
     aprint(f"Accelerate process {proc_index}/{num_procs} started. Device: {accelerator.device}")
-    
+
     # ---- 由 accelerator 管理的加载阶段：主进程先加载模型到 CPU，其他进程等待 ----
     model, tokenizer = load_lora_model_for_inference(
         base_model_path=base_model_path,
@@ -728,21 +728,9 @@ def run_inference_on_test_data(
         accelerator=accelerator,   # 关键：把 accelerator 传入 load 函数以使用 main_process_first
     )
 
-    def device_summary(mod):
-        if not isinstance(mod, torch.nn.Module):
-            return None
-        pd = set(str(p.device) for p in mod.parameters())
-        return pd
-
-    print("before prepare: inner model devices:", device_summary(model.model))
-
-    # 2) 把内部实际的 nn.Module 提交给 accelerator.prepare
-    #    这将在每个进程上把这些模块移动到该进程自己的 accelerator.device
-    model.prepare_for_accelerator(accelerator)
-
-    # debug: prepare 后检查
-    print("after prepare: accelerator.device:", accelerator.device)
-    print("after prepare: inner model devices:", device_summary(model.model))
+    # 把模型交给 accelerator 以将其移动到各自进程对应的设备（每个进程的 accelerator.device）
+    # 注意：accelerator.prepare 也可用于 dataloader 等，但此处只对模型使用
+    model = accelerator.prepare(model)
 
     # 确保 eval 模式
     model.eval()
@@ -988,7 +976,7 @@ if __name__ == "__main__":
             timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
 
-        accelerator = Accelerator(mixed_precision="bf16")
+        accelerator = Accelerator()
 
         # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
         run_inference_on_test_data(

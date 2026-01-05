@@ -102,11 +102,19 @@ class QueryAttentionProjector(nn.Module):
 # 2. 多模态融合模型 (兼容trl的SFTTrainer)
 # ============================
 class Qwen3MoleculeLLM(PreTrainedModel):
-    def __init__(self,
+    def __init__(self, 
                  qwen_model_name,
-                 mol_config,
-                 hf_device_map=None,   # 默认 None -> 我们内部会把 HF 模型加载到 CPU（更安全）
-                 ):
+                 mol_config,       # 🚨 必须传入配置字典
+                 device_map=None):
+        """
+        分子-文本多模态大语言模型
+        
+        参数:
+            qwen_model_name: Qwen基础模型路径
+            mol_config: 包含 input_dim, num_queries, num_heads 等参数的字典
+            device_map: 设备映射配置
+        """
+        # 加载Qwen模型的配置文件
         config = PretrainedConfig.from_pretrained(qwen_model_name)
         super().__init__(config)
 
@@ -117,7 +125,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.smi_ted_folder = mol_config.get('smi_ted_folder', ModelConfig.DEFAULT_SMI_TED_FOLDER)
         self.smi_ted_ckpt = mol_config.get('smi_ted_ckpt', ModelConfig.DEFAULT_SMI_TED_CKPT)
 
-        # tokenizer (keep in CPU / host memory)
+        # ---- 1. 加载预训练的Qwen LLM ----
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
         self.config._name_or_path = qwen_model_name
 
@@ -125,85 +133,47 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.extra_tokens = ["<mol_start>", "<mol_end>", "<latent>", "<start_latent>", "<end_latent>"]
         self.tokenizer.add_tokens(self.extra_tokens)
 
-        # -----------------------
-        # 加载基础 LLM：强制在 CPU 上加载权重以避免子进程把权重加载到默认 cuda:0
-        # -----------------------
-        # 首选使用 device_map={"": "cpu"} + low_cpu_mem_usage=True（如果 transformers 版本支持）
-        # 如果用户传入了 hf_device_map，则尊重（仅在非常了解场景下使用）
-        try:
-            if hf_device_map is None:
-                # prefer HF to load shards onto CPU
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    qwen_model_name,
-                    device_map={"": "cpu"},
-                    low_cpu_mem_usage=True,   # 如果 transformers 版本支持，会节省内存
-                    torch_dtype=torch.float32,
-                )
-            else:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    qwen_model_name,
-                    device_map=hf_device_map,
-                    torch_dtype=torch.float32,
-                )
-        except TypeError:
-            # 兼容老版本 transformers：不支持 device_map / low_cpu_mem_usage
-            self.model = AutoModelForCausalLM.from_pretrained(
-                qwen_model_name,
-                torch_dtype=torch.float32,
-                map_location="cpu"
-            )
-
-        # resize embedding on CPU (safe)
+        # 加载基础语言模型
+        self.model = AutoModelForCausalLM.from_pretrained(
+            qwen_model_name,
+            torch_dtype=torch.float32,
+            device_map=device_map
+        )
+        
+        # 调整词表大小以包含新添加的特殊标记
         self.model.resize_token_embeddings(len(self.tokenizer))
-
-        # special token ids（在 CPU 上）
+        
+        # 获取特殊标记的ID
         self.start_id = self.tokenizer.convert_tokens_to_ids("<mol_start>")
         self.end_id = self.tokenizer.convert_tokens_to_ids("<mol_end>")
         self.latent_id = self.tokenizer.convert_tokens_to_ids("<latent>")
         self.start_latent_id = self.tokenizer.convert_tokens_to_ids("<start_latent>")
         self.end_latent_id = self.tokenizer.convert_tokens_to_ids("<end_latent>")
 
-        # LLM embedding dim
+        # 获取LLM的嵌入维度
         self.d_llm = self.model.get_input_embeddings().weight.shape[1]
 
-        # -----------------------
-        # 分子编码器（确保在 CPU 上）
-        # -----------------------
-        # load_smi_ted 可能默认放在 GPU；在 wrapper 内立即把它移动到 CPU（保证 load 阶段全是在 CPU）
+        # ---- 2. 分子编码器和投影器 ----
+        # 加载预训练的分子编码器（SMI-TED）
         self.mol_encoder = load_smi_ted(
             folder=self.smi_ted_folder,
             ckpt_filename=self.smi_ted_ckpt
         )
-        # 强制移动 mol_encoder 到 CPU 并 freeze
-        try:
-            self.mol_encoder = self.mol_encoder.to(torch.device("cpu"))
-        except Exception:
-            # 如果 load_smi_ted 返回非 nn.Module（极少见），忽略
-            pass
-        for p in getattr(self.mol_encoder, "parameters", lambda: [])():
-            try:
-                p.requires_grad = False
-            except Exception:
-                pass
-        try:
-            self.mol_encoder.eval()
-        except Exception:
-            pass
-
-        # -----------------------
-        # 投影器（在 CPU 上初始化），保持为 nn.Module
-        # -----------------------
+        
+        # 冻结分子编码器参数
+        for param in self.mol_encoder.parameters():
+            param.requires_grad = False
+        self.mol_encoder.eval()
+        
+        # 初始化投影器，使用动态解析的参数
         self.projector = QueryAttentionProjector(
             input_dim=self.mol_input_dim,
             num_queries=self.num_queries,
             output_dim=self.d_llm,
             num_heads=self.mol_num_heads
         )
-        # 确保 projector 在 CPU（不要传 dtype 为 device）
-        try:
-            self.projector = self.projector.to(torch.device("cpu"))
-        except Exception:
-            pass
+        # 确保投影器类型与基础模型一致
+        self.projector.to(self.model.dtype)
 
     def gradient_checkpointing_enable(self, **kwargs):
         """
@@ -218,43 +188,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         if hasattr(self.model, "gradient_checkpointing_disable"):
             self.model.gradient_checkpointing_disable()
-
-    # 将 wrapper 内部的实际 torch Modules 交由 accelerate.prepare，并把 prepared 结果写回 wrapper
-    def prepare_for_accelerator(self, accelerator):
-        """
-        将内部真正的 nn.Module（self.model, self.projector, self.mol_encoder）传入 accelerator.prepare，
-        并把返回的 prepared module 赋回 self。此函数必须在所有进程中调用（即在每个进程里）
-        调用样例（在脚本里）：
-            model, tokenizer = load_lora_model_for_inference(...)
-            model.prepare_for_accelerator(accelerator)
-        """
-        modules = []
-        names = []
-
-        if isinstance(self.model, nn.Module):
-            modules.append(self.model)
-            names.append("model")
-        if isinstance(self.projector, nn.Module):
-            modules.append(self.projector)
-            names.append("projector")
-        # 有的 mol_encoder 可能不是 nn.Module，但通常是
-        if isinstance(self.mol_encoder, nn.Module):
-            modules.append(self.mol_encoder)
-            names.append("mol_encoder")
-
-        if len(modules) == 0:
-            # nothing to prepare
-            return
-
-        # accelerator.prepare 支持接收多个模块并返回 tuple
-        prepared = accelerator.prepare(*modules)
-        # 如果只返回单个对象，统一成 tuple
-        if not isinstance(prepared, (list, tuple)):
-            prepared = (prepared,)
-
-        # 将 prepared 的模块按顺序回写
-        for n, mod in zip(names, prepared):
-            setattr(self, n, mod)
 
     def _apply_latent_feedback(self, initial_embeds, attention_mask, latent_positions):
         """
