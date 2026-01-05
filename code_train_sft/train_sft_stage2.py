@@ -17,7 +17,7 @@ import plotext as plt
 from config import ModelConfig
 from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
-
+from tqdm import tqdm
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -721,14 +721,11 @@ def run_inference_on_test_data(
     results = []
 
     # 逐样本推理（保持原有逐个样本日志/错误捕获）
-    for idx in range(len(dataset)):
+    for idx in tqdm(range(len(dataset))):
         item = dataset[idx]  # 已包含: input_ids (list[int]), attention_mask (list[int]), labels (None), smiles (list[str])
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing sample {idx+1}/{len(dataset)}")
 
         try:
             smiles_list = item.get("smiles", []) or []
-            logger.info(f"Input SMILES: {smiles_list}")
             # 清理 SMILES（去掉点）
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
 
@@ -757,15 +754,11 @@ def run_inference_on_test_data(
 
             generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
 
-            logger.info(f"Generated response: {generated_text[:200]}...")
-
             result = {
                 "sample_id": idx,
                 "smiles": smiles_list,
-                "generated_response": generated_text.strip(),
+                "result": generated_text.strip(),
                 # eval 模式下 ground truth 已为 None（或原数据中存在时仍可访问）
-                "ground_truth_label": None,
-                "ground_truth_cot": None,
                 "task": item.get("task", None)
             }
             results.append(result)
@@ -777,10 +770,8 @@ def run_inference_on_test_data(
             results.append({
                 "sample_id": idx,
                 "smiles": item.get("smiles", []),
-                "generated_response": None,
+                "result": None,
                 "error": str(e),
-                "ground_truth_label": None,
-                "ground_truth_cot": None,
                 "task": item.get("task", None)
             })
 
