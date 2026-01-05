@@ -913,12 +913,11 @@ if __name__ == "__main__":
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
 
         # 决定用于本进程的 device
-        if args.gpu is not None:
-            device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")   # 等价于 cuda:0（当前进程可见的第 0 张）
+            torch.cuda.set_device(0)
         else:
-            # 如果用户使用 torch.distributed.launch / torchrun，会设置 LOCAL_RANK；优先使用环境变量
-            local_rank = int(os.environ.get("LOCAL_RANK", args.proc_index))
-            device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+            device = torch.device("cpu")
 
         # 设置当前 cuda device（当使用 cuda 时）
         if device.type == "cuda":

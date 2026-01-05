@@ -1,10 +1,5 @@
 set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <exp_name> <stage1_exp_name> <dataset_name> [cuda_visible_devices]"
-  exit 2
-fi
-
 # exp
 EXP_NAME=<exp_name>
 STAGE1_EXP_NAME=<stage_1_exp_name>
@@ -90,7 +85,6 @@ for idx in "${!GPU_ARRAY[@]}"; do
   LOG_FILE_PROC="${OUTPUT_DIR}/stage2_inference_and_eval_${TIMESTAMP}.proc${PROC_INDEX}.log"
 
   # 构造命令（在环境变量前缀里设置 CUDA_VISIBLE_DEVICES 以便只看到该卡）
-  CMD_ENV=(CUDA_VISIBLE_DEVICES="${GPU_ID}")
   CMD=( "${PYTHON_BIN}" "${SCRIPT_PATH}"
         --mode inference
         --output_dir "${OUTPUT_DIR}"
@@ -112,7 +106,7 @@ for idx in "${!GPU_ARRAY[@]}"; do
 
   # 打印并后台启动（日志重定向到 per-process log）
   echo "Launching proc ${PROC_INDEX} on GPU ${GPU_ID}: ${CMD_ENV[*]} ${CMD[*]}" | tee -a "${LOG_FILE}"
-  ( "${CMD_ENV[@]}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
+  ( env CUDA_VISIBLE_DEVICES="${GPU_ID}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
 
   PIDS+=($!)
 done
