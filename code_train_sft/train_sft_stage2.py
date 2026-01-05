@@ -14,13 +14,9 @@ import json
 import logging
 import wandb
 import plotext as plt
-from tqdm import tqdm
 from config import ModelConfig
 from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
-from accelerate import Accelerator
-import traceback
-import tempfile
 
 
 # 设置日志
@@ -677,74 +673,54 @@ def run_inference_on_test_data(
     max_new_tokens=2048,
     temperature=0.7,
     top_p=0.9,
-    device=None,                # 当用 accelerate 时忽略手动设备（会由 Accelerator 管理）
+    device="cuda" if torch.cuda.is_available() else "cpu",
     save_results_path=None,
-    batch_size=1,               # 仍以 sample-level 为主
+    batch_size=1,
     max_samples=None,
     tokenization_max_len=None
 ):
     """
-    使用 accelerate 进行 sample-level 的多GPU并行推理。
+    基于 load_data(..., eval_mode=True) 的推理流程。
 
-    注意:
-      - 请用 `accelerate launch script.py` 来运行包含此函数的脚本，或在 accelerate 已配置的环境中调用。
-      - 该实现通过将样本索引按 process_index 切片分配给不同进程（idx % num_processes）来实现并行。
-      - 只有主进程 (process_index == 0) 会合并并写出最终的 save_results_path 文件并返回完整结果列表。
-        其他进程会返回其本地的 partial results（列表）。
+    说明：
+      - 该函数会调用 load_test_data(...) 获取已经 tokenized 的 eval 数据（labels 为 None）。
+      - 目前实现以 sample-level (batch_size=1) 推理为主，保持逻辑简洁稳定。
     """
     logger.info(f"Running inference on test data from {test_data_path}")
-    logger.info(f"Max new tokens: {max_new_tokens}")
+    logger.info(f"Device: {device}, Max new tokens: {max_new_tokens}")
 
-    # 初始化 accelerator
-    accelerator = Accelerator()
-    proc_index = accelerator.process_index
-    num_procs = accelerator.num_processes
-
-    # 由 accelerator 管理日志输出（避免跨进程乱输出）
-    def aprint(*args, **kwargs):
-        # 仅主进程默认打印；如果需要每个进程打印可改条件
-        if accelerator.is_main_process:
-            logger.info(" ".join(map(str, args)))
-        else:
-            # 仍使用 logger.debug 避免太多冗余主日志
-            logger.debug(f"proc{proc_index} - " + " ".join(map(str, args)))
-
-    aprint(f"Accelerate process {proc_index}/{num_procs} started. Device: {accelerator.device}")
-
-    # 加载并 tokenized 的 eval dataset（与你原先的 load_test_data 保持一致）
+    # 加载并 tokenized 的 eval dataset
     dataset = load_test_data(test_data_path, max_len=tokenization_max_len)
 
     # 限制样本数量
     if max_samples is not None and max_samples < len(dataset):
         dataset = dataset.select(range(max_samples))
 
-    total_samples = len(dataset)
-    aprint(f"Total eval samples: {total_samples} (process {proc_index} will take ~1/{num_procs})")
+    logger.info(f"Number of eval samples to run: {len(dataset)}")
 
-    # 让 accelerator 管理模型的设备（prepare 不改变模型行为，但便于后续一致）
+    # 确保模型在正确设备上
     model.eval()
-    # 将模型移动到 accelerator 管理的设备（accelerator.prepare 也可接 dataloader 等）
-    model = accelerator.prepare(model)
+    model = model.to(device)
 
-    local_results = []
-
-    # 分配给当前进程的样本索引（按顺序分配： start=proc_index, step=num_procs）
-    assigned_indices = list(range(proc_index, total_samples, num_procs))
-    aprint(f"Process {proc_index}: assigned {len(assigned_indices)} samples")
+    results = []
 
     # 逐样本推理（保持原有逐个样本日志/错误捕获）
-    for local_i, idx in enumerate(tqdm(assigned_indices, desc=f"proc{proc_index}", disable=False)):
+    for idx in range(len(dataset)):
         item = dataset[idx]  # 已包含: input_ids (list[int]), attention_mask (list[int]), labels (None), smiles (list[str])
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing sample {idx+1}/{len(dataset)}")
 
         try:
             smiles_list = item.get("smiles", []) or []
+            logger.info(f"Input SMILES: {smiles_list}")
+            # 清理 SMILES（去掉点）
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
 
             # 构造 tensor inputs（单样本）
-            # 注意：使用 accelerator.device 确保放到正确设备
-            input_ids = torch.tensor(item["input_ids"], dtype=torch.long).unsqueeze(0).to(accelerator.device)
-            attention_mask = torch.tensor(item["attention_mask"], dtype=torch.long).unsqueeze(0).to(accelerator.device)
+            input_ids = torch.tensor(item["input_ids"], dtype=torch.long).unsqueeze(0).to(device)
+            attention_mask = torch.tensor(item["attention_mask"], dtype=torch.long).unsqueeze(0).to(device)
 
+            # 生成
             with torch.no_grad():
                 generated_ids = model.generate(
                     smiles_list=[cleaned_smiles],
@@ -756,146 +732,76 @@ def run_inference_on_test_data(
                     do_sample=True if temperature > 0 else False,
                 )
 
-            gen0 = generated_ids[0]
-            # 如果生成结果是 tensor，先把它移到 CPU（accelerator 会自动处理，但为保险起见）
-            if isinstance(gen0, torch.Tensor):
-                gen0_cpu = accelerator.gather(gen0.unsqueeze(0))[0] if num_procs > 1 else gen0.cpu()
-                generated_text = tokenizer.decode(gen0_cpu, skip_special_tokens=True)
+            # 兼容返回类型（tensor / list）
+            if isinstance(generated_ids, torch.Tensor):
+                gen0 = generated_ids[0]
             else:
-                # 某些模型返回 list[int] / numpy array
-                try:
-                    generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
-                except Exception:
-                    generated_text = str(gen0)
+                # 可能是 list of tensors
+                gen0 = generated_ids[0]
+
+            generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
+
+            logger.info(f"Generated response: {generated_text[:200]}...")
 
             result = {
                 "sample_id": idx,
                 "smiles": smiles_list,
-                "result": generated_text.strip(),
+                "generated_response": generated_text.strip(),
+                # eval 模式下 ground truth 已为 None（或原数据中存在时仍可访问）
+                "ground_truth_label": None,
+                "ground_truth_cot": None,
                 "task": item.get("task", None)
             }
-            local_results.append(result)
+            results.append(result)
 
         except Exception as e:
-            logger.error(f"Error processing sample {idx} on proc {proc_index}: {e}")
+            logger.error(f"Error processing sample {idx}: {e}")
+            import traceback
             logger.error(traceback.format_exc())
-            local_results.append({
+            results.append({
                 "sample_id": idx,
                 "smiles": item.get("smiles", []),
-                "result": None,
+                "generated_response": None,
                 "error": str(e),
+                "ground_truth_label": None,
+                "ground_truth_cot": None,
                 "task": item.get("task", None)
             })
 
-        # 释放显存（按需）
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 每个进程把自己局部结果写到磁盘（主进程稍后合并）
-    # 构造部分文件路径（使用 save_results_path 的目录，如果没有则 tmp dir）
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Inference completed on {len(results)} samples")
+
+    # 保存结果（保持原有结构）
     if save_results_path:
-        base_dir = os.path.dirname(save_results_path) if os.path.dirname(save_results_path) else "."
-        os.makedirs(base_dir, exist_ok=True)
-        part_prefix = os.path.join(base_dir, os.path.basename(save_results_path))
-    else:
-        # 无 save path，写到临时目录
-        tmpdir = tempfile.gettempdir()
-        ts = int(time.time() * 1000)
-        part_prefix = os.path.join(tmpdir, f"accelerate_inference_{ts}")
+        from datetime import datetime
 
-    part_path = f"{part_prefix}.part{proc_index}.json"
-    with open(part_path, "w", encoding="utf-8") as pf:
-        json.dump({
-            "process_index": proc_index,
-            "num_processes": num_procs,
-            "local_results": local_results
-        }, pf, indent=2, ensure_ascii=False)
+        save_data = {
+            "timestamp": datetime.now().isoformat(),
+            "test_data_path": test_data_path,
+            "model_info": {
+                "device": str(device),
+                "total_parameters": sum(p.numel() for p in model.parameters()),
+                "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+            },
+            "generation_config": {
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+            },
+            "num_samples": len(results),
+            "test_results": results
+        }
 
-    aprint(f"Process {proc_index} wrote partial results to {part_path}")
+        os.makedirs(os.path.dirname(save_results_path) if os.path.dirname(save_results_path) else ".", exist_ok=True)
+        with open(save_results_path, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, indent=2, ensure_ascii=False)
 
-    # 等待所有进程完成写文件
-    accelerator.wait_for_everyone()
+        logger.info(f"Results saved to: {save_results_path}")
 
-    # 主进程合并所有 parts
-    if accelerator.is_main_process:
-        merged = []
-        # 查找所有 part 文件（proc 0..num_procs-1）
-        part_files = []
-        for p in range(num_procs):
-            candidate = f"{part_prefix}.part{p}.json"
-            if os.path.exists(candidate):
-                part_files.append(candidate)
-            else:
-                logger.warning(f"Expected part file missing: {candidate}")
-
-        # 读取并合并
-        for pf in part_files:
-            try:
-                with open(pf, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    merged.extend(data.get("local_results", []))
-            except Exception as e:
-                logger.error(f"Failed to read part file {pf}: {e}")
-                logger.error(traceback.format_exc())
-
-        # 按 sample_id 排序以恢复原始顺序
-        merged_sorted = sorted(merged, key=lambda x: x.get("sample_id", -1))
-
-        # 如果需要保存最终结果（当用户提供 save_results_path 时，覆盖为最终文件）
-        if save_results_path:
-            save_file = save_results_path
-        else:
-            # 当用户未指定保存路径，主进程也会把合并结果写到一个临时文件并告知路径
-            save_file = f"{part_prefix}.merged.json"
-
-        # 生成 metadata + 保存
-        try:
-            # 统计参数（使用 accelerator.unwrap_model 获取真实模型）
-            try:
-                real_model = accelerator.unwrap_model(model)
-            except Exception:
-                real_model = model
-
-            save_data = {
-                "timestamp": datetime.now().isoformat(),
-                "test_data_path": test_data_path,
-                "model_info": {
-                    "device": str(accelerator.device),
-                    "total_parameters": sum(p.numel() for p in real_model.parameters()),
-                    "trainable_parameters": sum(p.numel() for p in real_model.parameters() if p.requires_grad),
-                },
-                "generation_config": {
-                    "max_new_tokens": max_new_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                },
-                "num_samples": len(merged_sorted),
-                "test_results": merged_sorted
-            }
-
-            os.makedirs(os.path.dirname(save_file) if os.path.dirname(save_file) else ".", exist_ok=True)
-            with open(save_file, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, indent=2, ensure_ascii=False)
-
-            logger.info(f"Master process saved merged results to: {save_file}")
-        except Exception as e:
-            logger.error(f"Failed to save merged results: {e}")
-            logger.error(traceback.format_exc())
-
-        # 清理部分文件（可选）
-        for pf in part_files:
-            try:
-                os.remove(pf)
-            except Exception:
-                pass
-
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Inference completed on {len(merged_sorted)} samples (merged).")
-        return merged_sorted
-
-    else:
-        # 非主进程仅返回本进程的本地结果（若脚本是由 accelerate launch 调用，通常主进程会是使用者关心的）
-        return local_results
+    return results
 
 # 主函数 - 修改以支持第二轮训练
 if __name__ == "__main__":
