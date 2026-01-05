@@ -9,7 +9,7 @@ import json
 
 parser = ArgumentParser()
 parser.add_argument('--result_path', type=str, required=True)
-parser.add_argument('--log_name', type=str, default=None)
+parser.add_argument('--log_name', type=str, required=True)
 args = parser.parse_args()
 
 result_path = args.result_path

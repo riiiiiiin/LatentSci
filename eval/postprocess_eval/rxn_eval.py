@@ -103,12 +103,16 @@ def evaluate_rxn_score(model_name: str, logs_dir: str = 'logs'):
     subtasks = subtask_to_result_key.keys()
     for subtask in subtasks:
         logger.info(f'evaluating {subtask} for model {model_name}')
-        if subtask == 'MechSel' or subtask == 'mechsel':
-            all_results[subtask] = evaluate_MechSel(model_name)
-        elif subtask in ['major_product', 'byproduct']:
-            all_results[subtask] = evaluate_mol(model_name, subtask, f"{logs_dir}/fs")
-        else:
-            all_results[subtask] = evaluate_mol(model_name, subtask)
+        try:
+            if subtask == 'MechSel' or subtask == 'mechsel':
+                all_results[subtask] = evaluate_MechSel(model_name)
+            elif subtask in ['major_product', 'byproduct']:
+                all_results[subtask] = evaluate_mol(model_name, subtask, f"{logs_dir}/fs")
+            else:
+                all_results[subtask] = evaluate_mol(model_name, subtask)
+        except Exception as e:
+            logger.error(f"Error evaluating {subtask} for {model_name}: {e}")
+            all_results[subtask] = None
     logger.info(f"eval_score_{model_name}_rxn:\n\r{all_results}")
     os.makedirs("results/rxn", exist_ok=True)
     json.dump(all_results, open(f"results/rxn/eval_score_{model_name}.json", "w"), indent=4)
