@@ -106,7 +106,7 @@ for idx in "${!GPU_ARRAY[@]}"; do
 
   # 打印并后台启动（日志重定向到 per-process log）
   echo "Launching proc ${PROC_INDEX} on GPU ${GPU_ID}: ${CMD_ENV[*]} ${CMD[*]}" | tee -a "${LOG_FILE}"
-  ( env CUDA_VISIBLE_DEVICES="${GPU_ID}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
+  ( env CUDA_VISIBLE_DEVICES="${GPU_ID}" HF_DATASETS_CACHE="${OUTPUT_DIR}/hf_cache_proc${PROC_INDEX}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
 
   PIDS+=($!)
 done
