@@ -14,10 +14,6 @@ conda env create -f biolatent_environment1.yml
 
 conda activate biolatenecot_dev
 
-pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1 
-
-pip install plotext
-
 
 📊 Data Preparation
 

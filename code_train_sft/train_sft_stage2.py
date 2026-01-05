@@ -186,7 +186,10 @@ def train_sft_lora(
     output_dir=ModelConfig.DEFAULT_OUTPUT_DIR,
     epochs=3,
     batch_size=32,
-    lr=2e-4,
+    lr=5e-5,
+    lora_alpha=32, 
+    lora_rank=16, 
+    finetuned_layers="all-linear",
     max_seq_length=8192,
     grad_accum=1,  # 新增：梯度累积步数
     resume_from_checkpoint=None,  # 新增：从检查点恢复训练
@@ -245,8 +248,10 @@ def train_sft_lora(
             "learning_rate": lr,
             "max_seq_length": max_seq_length,
             "training_strategy": "LoRA-SFT",
-            "lora_r": 16,
-            "lora_alpha": 32,
+            "learning_rate": lr,
+            "lora_r": lora_rank,
+            "lora_alpha": lora_alpha,
+            "finetuned_layers": finetuned_layers,
             "lora_dropout": 0.1,
             "optimizer": "adamw_8bit",
             "mixed_precision": "bf16",
@@ -298,15 +303,23 @@ def train_sft_lora(
         for param in model.parameters():
             param.requires_grad = False
         
+        if finetuned_layers == "all-linear":
+            target_modules = [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"
+            ]
+        else:
+            target_modules = [m.strip() for m in finetuned_layers.split(",")]
         # LoRA配置
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=16,  # LoRA秩
-            lora_alpha=32,  # LoRA alpha
+            r=lora_rank,
+            lora_alpha=lora_alpha,
             lora_dropout=0.1,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=target_modules,
             bias="none",
         )
+
         
         # 将LoRA适配器添加到LLM部分
         logger.info("Adding LoRA adapters to LLM...")
@@ -379,6 +392,10 @@ def train_sft_lora(
     logger.info(f"  Resume from: {resume_from_checkpoint or 'None'}")
     logger.info(f"  Pre-trained LoRA: {lora_weights_path or 'None'}")
     logger.info(f"  Pre-trained projector: {projector_path or 'None'}")
+    logger.info(f"  LoRA rank: {lora_rank}")
+    logger.info(f"  LoRA alpha: {lora_alpha}")
+    logger.info(f"  Finetuned layers: {finetuned_layers}")
+
     
     # ============================
     # 6. 初始化 MultiModalSFTTrainer
@@ -491,6 +508,9 @@ def train_sft_lora(
             "epochs": epochs,
             "batch_size": batch_size,
             "learning_rate": lr,
+            "lora_rank": lora_rank,
+            "lora_alpha": lora_alpha,
+            "finetuned_layers": finetuned_layers,
             "max_seq_length": max_seq_length,
             "resume_from_checkpoint": resume_from_checkpoint,
             "pretrained_lora": lora_weights_path,
@@ -874,6 +894,16 @@ if __name__ == "__main__":
     # 权重加载参数
     parser.add_argument("--lora_path", type=str, default=None, help="预训练 LoRA 权重路径")
     parser.add_argument("--projector_path", type=str, default=None, help="预训练投影器权重路径")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
+    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank (r)")
+    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
+    parser.add_argument(
+        "--finetuned_layers",
+        type=str,
+        default="all-linear",
+        help="LoRA target modules: 'all-linear' or comma-separated list (e.g. q_proj,v_proj)"
+    )
+
     
     # 分子模型超参数
     parser.add_argument("--num_queries", type=int, default=ModelConfig.NUM_QUERIES, help="投影器查询向量数量")
@@ -921,6 +951,10 @@ if __name__ == "__main__":
             mol_config=mol_config,
             include_cot=args.include_cot,
             save_full_model=args.save_full_model,
+            lr=args.lr,
+            lora_alpha=args.lora_alpha,
+            lora_rank=args.lora_rank,
+            finetuned_layers=args.finetuned_layers,
         )
         logger.info("Training completed!")
     
