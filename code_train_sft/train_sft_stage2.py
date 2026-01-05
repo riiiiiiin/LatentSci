@@ -977,19 +977,12 @@ if __name__ == "__main__":
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
 
         accelerator = Accelerator()
-        
-        model, tokenizer = load_lora_model_for_inference(
-            base_model_path=None,
-            lora_weights_path=lora_path,
-            projector_path=projector_path,
-            mol_config=mol_config,
-            accelerator=accelerator,
-        )
 
         # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
         run_inference_on_test_data(
-            model=model,
-            tokenizer=tokenizer,
+            base_model_path=None,
+            lora_weights_path=lora_path,
+            projector_path=projector_path,
             test_data_path=test_data_path,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
