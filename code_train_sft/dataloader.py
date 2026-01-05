@@ -396,6 +396,45 @@ def load_data(
 
 
 # --------------------------------
+# 3b. GRPO prompt-only dataset (for RL)
+# --------------------------------
+def load_grpo_data(path):
+    """
+    Load a prompt-only dataset for GRPO-style RL training.
+
+    Returns a HuggingFace `Dataset` with (at least):
+    - `prompt`: str
+    - `input_smiles`: list[str]
+
+    Tokenization/collation should be handled by the GRPO trainer's collate function.
+    """
+    # 扫描所有 JSON 文件并排除 rxn/rcr.json
+    all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
+    data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
+    from datasets import load_dataset
+    ds = load_dataset("json", data_files=data_files)["train"]
+
+    # 过滤已知损坏的数据 ID
+    bad_ids = [
+        "f7e567a6-47de-4c77-8c1f-9049689322e8",
+        "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
+        "9cb0a77d-6203-4686-9c8b-45fd3fc770f2",
+    ]
+    ds = ds.filter(lambda x: x["id"] not in bad_ids)
+
+    dataset = ds.map(
+        extract_fields,
+        batched=False,
+        remove_columns=ds.column_names,
+    )
+
+    # Keep only what GRPO needs
+    dataset = dataset.rename_column("query", "prompt")
+    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("prompt", "input_smiles")])
+    return dataset
+
+
+# --------------------------------
 # 4. 运行示例与测试
 # --------------------------------
 if __name__ == "__main__":

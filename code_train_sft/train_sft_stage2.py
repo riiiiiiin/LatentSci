@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import inspect
 from trl import SFTTrainer, SFTConfig
 from transformers import (
     AutoTokenizer, 
@@ -158,7 +159,11 @@ class MultiModalSFTTrainer(SFTTrainer):
             return (loss_pos, outputs_pos) if return_outputs else loss_pos
 
         # --- Corrupted forward pass ---
-        outputs_cf = model(**inputs, do_perturb=True)
+        # 🚨 DDP FIX: If the model is wrapped in DDP, calling it twice triggers "marked ready twice" error.
+        # We call the underlying module for the second pass to avoid this.
+        # Gradients from both passes will be summed in the .grad fields and synced by DDP's first-pass hook.
+        unwrapped_model = model.module if hasattr(model, "module") else model
+        outputs_cf = unwrapped_model(**inputs, do_perturb=True)
         loss_cf = outputs_cf.loss
 
         # Hinge on CE gap: enforce L_cf - L_pos >= margin
@@ -381,33 +386,41 @@ def train_sft_lora(
     # ============================
     logger.info("Configuring training arguments...")
     
-    training_args = SFTConfig(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=grad_accum,
-        learning_rate=lr,
-        bf16=True,
-        max_seq_length=max_seq_length,
-        packing=False,
-        dataset_text_field=None,
-        remove_unused_columns=False,
-        logging_steps=10,
-        eval_strategy="no", # 不做划分，直接全部训练
-        save_strategy="no", # 🚨 不保存中间检查点，节省空间
-        save_total_limit=1,
-        gradient_checkpointing=True, # 🚨 针对 8192 长度默认开启，防止 OOM
-        max_grad_norm=0.3,
-        warmup_ratio=0.1,
-        report_to="wandb", # 🚨 开启官方 wandb 支持
-        dataloader_num_workers=2,
-        optim="adamw_8bit",
-        lr_scheduler_type="cosine",
-        weight_decay=0.01,
-        logging_dir=os.path.join(output_dir, "logs"),
-        resume_from_checkpoint=resume_from_checkpoint,
-    )
+    # 兼容不同版本的 TRL (0.15 vs 0.24+)
+    sft_config_kwargs = {
+        "output_dir": output_dir,
+        "num_train_epochs": epochs,
+        "per_device_train_batch_size": batch_size,
+        "per_device_eval_batch_size": 1,
+        "gradient_accumulation_steps": grad_accum,
+        "learning_rate": lr,
+        "bf16": True,
+        "packing": False,
+        "dataset_text_field": None,
+        "remove_unused_columns": False,
+        "logging_steps": 10,
+        "eval_strategy": "no", # 不做划分，直接全部训练
+        "save_strategy": "no", # 🚨 不保存中间检查点，节省空间
+        "save_total_limit": 1,
+        "gradient_checkpointing": True, # 🚨 针对 8192 长度默认开启，防止 OOM
+        "max_grad_norm": 0.3,
+        "warmup_ratio": 0.1,
+        "report_to": "wandb", # 🚨 开启官方 wandb 支持
+        "dataloader_num_workers": 2,
+        "optim": "adamw_8bit",
+        "lr_scheduler_type": "cosine",
+        "weight_decay": 0.01,
+        "logging_dir": os.path.join(output_dir, "logs"),
+        "resume_from_checkpoint": resume_from_checkpoint,
+    }
+    
+    # 检查 SFTConfig 支持哪个参数名 (max_seq_length 还是 max_length)
+    if "max_seq_length" in inspect.signature(SFTConfig.__init__).parameters:
+        sft_config_kwargs["max_seq_length"] = max_seq_length
+    else:
+        sft_config_kwargs["max_length"] = max_seq_length
+
+    training_args = SFTConfig(**sft_config_kwargs)
     
     # 打印训练配置
     logger.info(f"Training Configuration:")
@@ -436,7 +449,7 @@ def train_sft_lora(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         callbacks=[LoraTrainingMonitorCallback(), TerminalPlotCallback()],
     )

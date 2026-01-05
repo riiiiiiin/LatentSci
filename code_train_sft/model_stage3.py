@@ -489,9 +489,140 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         )
 
     @torch.no_grad()
+    def get_prompt_embeddings(
+        self,
+        smiles_list: List[List[str]],
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        refine_bio_tokens: bool = True,
+    ):
+        """
+        Build fused prompt embeddings for generation.
+
+        This mirrors `generate()` up to (and including) the Coconut latent-feedback refinement.
+        It returns:
+        - `prompt_embeds`: (B, L, d_llm) fused embeddings (left-padded)
+        - `prompt_attn_mask`: (B, L) attention mask aligned to `prompt_embeds`
+
+        This is used by vLLM generation paths that accept `prompt_embeds`.
+        """
+        device = input_ids.device
+        B = input_ids.size(0)
+
+        # =========================================================
+        # 1. Molecule features: flatten + batch projection
+        # =========================================================
+        mol_emb_nested = self.mol_encoder.encode(smiles_list)
+
+        flat_mols = []
+        mol_counts = []
+        for sample_mols in mol_emb_nested:
+            mol_counts.append(len(sample_mols))
+            flat_mols.extend(sample_mols)
+
+        if flat_mols:
+            max_L_mol = max(m.size(0) for m in flat_mols)
+            padded_mols = torch.zeros(
+                len(flat_mols), max_L_mol, self.mol_input_dim, device=device, dtype=self.model.dtype
+            )
+            mol_key_padding_mask = torch.ones(len(flat_mols), max_L_mol, device=device, dtype=torch.bool)
+
+            for i, m in enumerate(flat_mols):
+                curr_L = m.size(0)
+                padded_mols[i, :curr_L] = m.to(device=device, dtype=self.model.dtype)
+                mol_key_padding_mask[i, :curr_L] = False
+
+            flat_feats_llm = self.projector(padded_mols, key_padding_mask=mol_key_padding_mask)
+        else:
+            flat_feats_llm = []
+
+        # LLM embedding layer
+        embed = self.model.get_input_embeddings()
+        start_emb = embed(torch.tensor([[self.start_id]], device=device))
+        end_emb = embed(torch.tensor([[self.end_id]], device=device))
+
+        # =========================================================
+        # 2. Reconstruct + fuse variable-length (strip text padding)
+        # =========================================================
+        text_emb = embed(input_ids).to(dtype=self.model.dtype)
+        fused_samples_list = []
+        bio_positions_list = []
+        cursor = 0
+
+        for b in range(B):
+            sample_mol_parts = []
+            b_bio_indices = []
+            current_mol_offset = 0
+            for _ in range(mol_counts[b]):
+                m_feat = flat_feats_llm[cursor].unsqueeze(0)
+                m_with_tags = torch.cat([start_emb, m_feat, end_emb], dim=1)
+                sample_mol_parts.append(m_with_tags)
+
+                start_query_pos = current_mol_offset + 1
+                end_query_pos = start_query_pos + self.num_queries
+                b_bio_indices.extend(range(start_query_pos, end_query_pos))
+                current_mol_offset += (self.num_queries + 2)
+                cursor += 1
+
+            bio_positions_list.append(b_bio_indices)
+            mol_part = (
+                torch.cat(sample_mol_parts, dim=1)
+                if sample_mol_parts
+                else torch.zeros(1, 0, self.d_llm, device=device, dtype=self.model.dtype)
+            )
+
+            if attention_mask is not None:
+                non_pad_indices = attention_mask[b].bool()
+                t_emb = text_emb[b][non_pad_indices]
+            else:
+                t_emb = text_emb[b]
+
+            fused_samples_list.append(torch.cat([mol_part, t_emb.unsqueeze(0)], dim=1))
+
+        # =========================================================
+        # 3. Left pad to batch max length (generation-style)
+        # =========================================================
+        max_fused_L = max(s.size(1) for s in fused_samples_list)
+        prompt_embeds = torch.zeros(B, max_fused_L, self.d_llm, device=device, dtype=self.model.dtype)
+        prompt_attn_mask = torch.zeros(B, max_fused_L, device=device, dtype=torch.long)
+
+        diffs = []
+        for b in range(B):
+            curr_L = fused_samples_list[b].size(1)
+            diff = max_fused_L - curr_L
+            diffs.append(diff)
+            prompt_embeds[b, diff:] = fused_samples_list[b]
+            prompt_attn_mask[b, diff:] = 1
+
+        # =========================================================
+        # 4. Coconut latent-feedback refinement (optional based on presence of <latent>)
+        # =========================================================
+        has_latent = (input_ids == self.latent_id).any().item()
+        if has_latent and attention_mask is not None:
+            latent_positions = []
+            final_bio_positions = []
+            for b in range(B):
+                mol_len_b = mol_counts[b] * (self.num_queries + 2)
+                t_mask_b = attention_mask[b].bool()
+                rel_latent_indices = (input_ids[b][t_mask_b] == self.latent_id).nonzero(as_tuple=True)[0]
+                diff = diffs[b]
+                latent_positions.append((rel_latent_indices + mol_len_b + diff).tolist())
+                final_bio_positions.append([idx + diff for idx in bio_positions_list[b]])
+
+            prompt_embeds = self._apply_latent_feedback(
+                prompt_embeds,
+                prompt_attn_mask,
+                latent_positions,
+                bio_positions=final_bio_positions,
+                refine_bio_tokens=refine_bio_tokens,
+            )
+
+        return prompt_embeds, prompt_attn_mask
+
+    @torch.no_grad()
     def generate(
         self,
-        smiles_list: List[str],
+        smiles_list: List[List[str]],
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         max_new_tokens: int = 200,
@@ -505,123 +636,21 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         1. 支持变长分子和批量投影。
         2. 推理阶段自动改用左补齐 (Left Padding) 以确保生成质量。
         """
-        device = input_ids.device
-        B = input_ids.size(0)
+        # Backward compatible: allow passing List[str] (one SMILES per sample)
+        if smiles_list and isinstance(smiles_list[0], str):
+            smiles_list = [[s] for s in smiles_list]  # type: ignore[list-item]
 
-        # =========================================================
-        # 1. 分子特征拉平与批量投影
-        # =========================================================
-        mol_emb_nested = self.mol_encoder.encode(smiles_list)
-
-        flat_mols = []
-        mol_counts = []
-        for sample_mols in mol_emb_nested:
-            mol_counts.append(len(sample_mols))
-            flat_mols.extend(sample_mols)
-
-        if flat_mols:
-            max_L_mol = max(m.size(0) for m in flat_mols)
-            padded_mols = torch.zeros(len(flat_mols), max_L_mol, self.mol_input_dim, device=device, dtype=self.model.dtype)
-            mol_key_padding_mask = torch.ones(len(flat_mols), max_L_mol, device=device, dtype=torch.bool)
-            
-            for i, m in enumerate(flat_mols):
-                curr_L = m.size(0)
-                padded_mols[i, :curr_L] = m.to(device=device, dtype=self.model.dtype)
-                mol_key_padding_mask[i, :curr_L] = False
-            
-            flat_feats_llm = self.projector(padded_mols, key_padding_mask=mol_key_padding_mask)
-        else:
-            flat_feats_llm = []
-
-        # 获取 LLM 嵌入层
-        embed = self.model.get_input_embeddings()
-        start_emb = embed(torch.tensor([[self.start_id]], device=device))
-        end_emb = embed(torch.tensor([[self.end_id]], device=device))
-
-        # =========================================================
-        # 2. 结构还原与变长融合 (去文本 Padding)
-        # =========================================================
-        text_emb = embed(input_ids).to(dtype=self.model.dtype)
-        fused_samples_list = []
-        bio_positions_list = [] # Stage 3
-        cursor = 0
-
-        for b in range(B):
-            # 2.1 构造分子部分
-            sample_mol_parts = []
-            b_bio_indices = []
-            current_mol_offset = 0
-            for _ in range(mol_counts[b]):
-                m_feat = flat_feats_llm[cursor].unsqueeze(0)
-                m_with_tags = torch.cat([start_emb, m_feat, end_emb], dim=1)
-                sample_mol_parts.append(m_with_tags)
-                
-                start_query_pos = current_mol_offset + 1
-                end_query_pos = start_query_pos + self.num_queries
-                b_bio_indices.extend(range(start_query_pos, end_query_pos))
-                current_mol_offset += (self.num_queries + 2)
-                cursor += 1
-            
-            bio_positions_list.append(b_bio_indices)
-            mol_part = torch.cat(sample_mol_parts, dim=1) if sample_mol_parts else torch.zeros(1, 0, self.d_llm, device=device, dtype=self.model.dtype)
-
-            # 2.2 提取真实文本内容
-            if attention_mask is not None:
-                non_pad_indices = attention_mask[b].bool()
-                t_emb = text_emb[b][non_pad_indices]
-            else:
-                t_emb = text_emb[b]
-
-            # 2.3 融合
-            sample_fused = torch.cat([mol_part, t_emb.unsqueeze(0)], dim=1)
-            fused_samples_list.append(sample_fused)
-
-        # =========================================================
-        # 3. 推理专用：左补齐 (Left Padding)
-        # =========================================================
-        max_fused_L = max(s.size(1) for s in fused_samples_list)
-        final_embeds = torch.zeros(B, max_fused_L, self.d_llm, device=device, dtype=self.model.dtype)
-        final_attn_mask = torch.zeros(B, max_fused_L, device=device, dtype=torch.long)
-        
-        for b in range(B):
-            curr_L = fused_samples_list[b].size(1)
-            diff = max_fused_L - curr_L
-            # 内容靠右放，左边留白 (0)
-            final_embeds[b, diff:] = fused_samples_list[b]
-            final_attn_mask[b, diff:] = 1
-
-        # =========================================================
-        # 4. Coconut 推理支持
-        # =========================================================
-        has_latent = (input_ids == self.latent_id).any().item()
-        refine_bio_tokens = kwargs.get("refine_bio_tokens", True)
-        
-        if has_latent:
-            latent_positions = []
-            final_bio_positions = []
-            for b in range(B):
-                mol_len_b = mol_counts[b] * (self.num_queries + 2)
-                t_mask_b = attention_mask[b].bool()
-                rel_latent_indices = (input_ids[b][t_mask_b] == self.latent_id).nonzero(as_tuple=True)[0]
-                # 注意：generate 使用左补齐，所以还需要加上 diff 偏移
-                curr_L = fused_samples_list[b].size(1)
-                diff = max_fused_L - curr_L
-                
-                latent_positions.append((rel_latent_indices + mol_len_b + diff).tolist())
-                final_bio_positions.append([idx + diff for idx in bio_positions_list[b]])
-            
-            final_embeds = self._apply_latent_feedback(
-                final_embeds, 
-                final_attn_mask, 
-                latent_positions,
-                bio_positions=final_bio_positions,
-                refine_bio_tokens=refine_bio_tokens
-            )
-
+        # Reuse the shared embedding builder (and latent feedback) so vLLM can share the same code path.
+        prompt_embeds, prompt_attn_mask = self.get_prompt_embeddings(
+            smiles_list=smiles_list,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            refine_bio_tokens=kwargs.get("refine_bio_tokens", True),
+        )
         # 5. 调用生成
         outputs = self.model.generate(
-            inputs_embeds=final_embeds,
-            attention_mask=final_attn_mask,
+            inputs_embeds=prompt_embeds,
+            attention_mask=prompt_attn_mask,
             max_new_tokens=max_new_tokens,
             do_sample=do_sample,
             temperature=temperature if do_sample else None,

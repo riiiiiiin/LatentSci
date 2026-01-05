@@ -1,12 +1,18 @@
 import os
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, TrainingArguments, TrainerCallback
+from transformers import (
+    AutoTokenizer, 
+    TrainingArguments, 
+    TrainerCallback, 
+    DataCollatorForSeq2Seq
+)
 from trl import SFTConfig, SFTTrainer
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 import logging
 from datetime import datetime
 import argparse
+import inspect
 import wandb
 import plotext as plt
 
@@ -14,7 +20,172 @@ import plotext as plt
 from model_stage3 import Qwen3MoleculeLLM
 from dataloader import load_data, COCONUT_TOKENS
 from config import ModelConfig
-from train_sft_stage2 import MultiModalDataCollator, MultiModalSFTTrainer, LoraTrainingMonitorCallback, TerminalPlotCallback
+# from train_sft_stage2 import MultiModalDataCollator, MultiModalSFTTrainer, LoraTrainingMonitorCallback, TerminalPlotCallback
+import torch.nn.functional as F
+import random
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 自定义回调函数，用于监控训练过程
+class LoraTrainingMonitorCallback(TrainerCallback):
+    """LoRA训练监控回调函数：仅负责打印关键信息，不重复记录 wandb"""
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """同时打印日志到控制台"""
+        if logs:
+            if 'loss' in logs:
+                logger.info(f"Step {state.global_step}: loss = {logs['loss']:.4f}")
+            if 'learning_rate' in logs:
+                logger.info(f"Step {state.global_step}: lr = {logs['learning_rate']:.6f}")
+    
+    def on_train_begin(self, args, state, control, **kwargs):
+        """训练开始时记录LoRA参数信息"""
+        if 'model' in kwargs:
+            model = kwargs['model']
+            # 打印可训练参数信息
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            
+            logger.info(f"LoRA模型参数统计:")
+            logger.info(f"  总参数: {total_params:,}")
+            logger.info(f"  可训练参数: {trainable_params:,}")
+            logger.info(f"  可训练比例: {100 * trainable_params / total_params:.2f}%")
+            
+            # 记录到wandb
+            if wandb.run is not None:
+                wandb.config.update({
+                    "total_params": total_params,
+                    "trainable_params": trainable_params,
+                    "trainable_ratio": 100 * trainable_params / total_params
+                })
+            
+            # 打印LoRA适配器信息
+            if hasattr(model, 'peft_config'):
+                for adapter_name, config in model.peft_config.items():
+                    logger.info(f"  LoRA配置 - {adapter_name}:")
+                    logger.info(f"    r={config.r}, alpha={config.lora_alpha}, dropout={config.lora_dropout}")
+                    
+                    # 记录到wandb
+                    if wandb.run is not None:
+                        wandb.config.update({
+                            f"lora_{adapter_name}_r": config.r,
+                            f"lora_{adapter_name}_alpha": config.lora_alpha,
+                            f"lora_{adapter_name}_dropout": config.lora_dropout
+                        })
+    
+    def on_save(self, args, state, control, **kwargs):
+        """保存检查点时记录"""
+        if wandb.run is not None:
+            wandb.log({"checkpoint_step": state.global_step})
+    
+    def on_epoch_end(self, args, state, control, **kwargs):
+        """每个epoch结束时记录"""
+        if wandb.run is not None:
+            wandb.log({"epoch": state.epoch})
+
+# 终端绘图回调：用于在控制台实时显示 Loss 曲线
+class TerminalPlotCallback(TrainerCallback):
+    def __init__(self):
+        self.steps = []
+        self.losses = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs and "loss" in logs:
+            # 只有主进程负责绘图
+            if state.is_world_process_zero:
+                self.steps.append(state.global_step)
+                self.losses.append(logs["loss"])
+                
+                # 保持最近的 100 个点以保证终端显示效果
+                display_steps = self.steps[-100:]
+                display_losses = self.losses[-100:]
+
+                # 终端绘图逻辑
+                plt.clf()
+                plt.plot(display_steps, display_losses, marker="dot", color="red", label="SFT Loss")
+                plt.title("Real-time Training Loss (Terminal)")
+                plt.xlabel("Step")
+                plt.ylabel("Loss")
+                
+                # 设置合适终端大小的画布
+                plt.plotsize(100, 25)
+                plt.grid(True)
+                plt.show()
+
+# 工业级多模态数据整理器
+class MultiModalDataCollator(DataCollatorForSeq2Seq):
+    # ... (保持不变) ...
+    def __call__(self, features):
+        smiles = [f.pop("smiles") for f in features]
+        batch = super().__call__(features)
+        batch["smiles"] = smiles
+        return batch
+
+# 自定义 SFTTrainer 以支持多模态序列长度变化
+class MultiModalSFTTrainer(SFTTrainer):
+    def __init__(
+        self,
+        *args,
+        cf_lambda: float = 0.0,
+        cf_margin: float = 0.5,
+        cf_prob: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.cf_lambda = float(cf_lambda)
+        self.cf_margin = float(cf_margin)
+        self.cf_prob = float(cf_prob)
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        重写 compute_loss。
+        SFTTrainer 默认会在 compute_loss 中计算准确率指标，
+        这要求 logits 和 labels 形状必须完全一致。
+        在多模态场景下，序列会被拉长，因此我们回归标准 Trainer 的简单逻辑。
+        
+        注意：模型内部已经计算了正确的平均 Loss，这里直接返回即可。
+        """
+        # --- Clean forward pass (no perturbation) ---
+        outputs_pos = model(**inputs, do_perturb=False)
+        loss_pos = outputs_pos.loss
+
+        # Optionally enable counterfactual loss (paired pass)
+        do_cf = (
+            (self.cf_lambda is not None and self.cf_lambda > 0.0)
+            and (random.random() < self.cf_prob)
+        )
+
+        if not do_cf:
+            return (loss_pos, outputs_pos) if return_outputs else loss_pos
+
+        # --- Corrupted forward pass ---
+        # 🚨 DDP FIX: If the model is wrapped in DDP, calling it twice triggers "marked ready twice" error.
+        # We call the underlying module for the second pass to avoid this.
+        # Gradients from both passes will be summed in the .grad fields and synced by DDP's first-pass hook.
+        unwrapped_model = model.module if hasattr(model, "module") else model
+        outputs_cf = unwrapped_model(**inputs, do_perturb=True)
+        loss_cf = outputs_cf.loss
+
+        # Hinge on CE gap: enforce L_cf - L_pos >= margin
+        gap = loss_cf - loss_pos
+        loss_cf_term = F.relu(self.cf_margin - gap)
+        loss_total = loss_pos + (self.cf_lambda * loss_cf_term)
+
+        # Logging (avoid duplicated logs in DDP)
+        if getattr(self, "is_world_process_zero", False) and wandb.run is not None:
+            log_dict = {
+                "loss_pos": loss_pos.detach().float().item(),
+                "loss_cf": loss_cf.detach().float().item(),
+                "cf_gap": gap.detach().float().item(),
+                "loss_cf_term": loss_cf_term.detach().float().item(),
+                "loss_total": loss_total.detach().float().item(),
+            }
+            wandb.log(log_dict)
+
+        return (loss_total, outputs_pos) if return_outputs else loss_total
+
 
 def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_path=None):
     """
@@ -157,27 +328,34 @@ def train_stage3():
         stage_suffix = f"stage{args.training_stage}_sub{stage}" if is_coconut else f"stage{args.training_stage}"
         stage_output_dir = os.path.join(args.output_dir, stage_suffix)
         
-        training_args = SFTConfig(
-            output_dir=stage_output_dir,
-            num_train_epochs=args.epochs_per_stage, # 每个阶段练固定 Epoch
-            per_device_train_batch_size=args.batch_size,
-            gradient_accumulation_steps=args.grad_accum,
-            learning_rate=args.lr,
-            bf16=True,
-            max_seq_length=args.max_seq_length,
-            remove_unused_columns=False,
-            logging_steps=10,
-            save_strategy="no", # 🚨 不保存中间检查点，节省空间
-            save_total_limit=1,
-            gradient_checkpointing=True,
-            # 🚨 修复 DDP 错误：使用非重入式 checkpoint 并允许查找未使用参数
-            gradient_checkpointing_kwargs={"use_reentrant": False},
-            ddp_find_unused_parameters=True,
-            report_to="wandb",
-            optim="adamw_8bit",
-            lr_scheduler_type="cosine",
-            weight_decay=0.01,
-        )
+        # 兼容不同版本的 TRL (0.15 vs 0.24+)
+        sft_config_kwargs = {
+            "output_dir": stage_output_dir,
+            "num_train_epochs": args.epochs_per_stage,
+            "per_device_train_batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.grad_accum,
+            "learning_rate": args.lr,
+            "bf16": True,
+            "remove_unused_columns": False,
+            "logging_steps": 10,
+            "save_strategy": "no",
+            "save_total_limit": 1,
+            "gradient_checkpointing": True,
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+            "ddp_find_unused_parameters": True,
+            "report_to": "wandb",
+            "optim": "adamw_8bit",
+            "lr_scheduler_type": "cosine",
+            "weight_decay": 0.01,
+        }
+        
+        # 检查 SFTConfig 支持哪个参数名 (max_seq_length 还是 max_length)
+        if "max_seq_length" in inspect.signature(SFTConfig.__init__).parameters:
+            sft_config_kwargs["max_seq_length"] = args.max_seq_length
+        else:
+            sft_config_kwargs["max_length"] = args.max_seq_length
+
+        training_args = SFTConfig(**sft_config_kwargs)
 
         # WandB 记录
         if wandb.run is not None:
@@ -197,7 +375,7 @@ def train_stage3():
             model=model,
             args=training_args,
             train_dataset=train_dataset,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             data_collator=data_collator,
             cf_lambda=args.cf_lambda,
             cf_margin=args.cf_margin,

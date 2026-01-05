@@ -16,7 +16,7 @@ conda activate biolatenecot_dev
 
 pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1 
 
-pip install plotext
+pip install plotext wandb
 
 
 📊 Data Preparation
@@ -67,30 +67,32 @@ huggingface-cli download --resume-download ibm-research/materials.smi-ted --loca
 🏋️ Training 
 
 ```
-accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
-  --mode train \
-  --include_cot false \
-  --output_dir ./outputs/stage1_no_cot \
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
+  --training_stage 1 \
+  --epochs_per_stage 3 \
+  --output_dir ./outputs/stage1 \
   --batch_size 2 \
-  --grad_accum 1 \
-  --epochs 3
-
-accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
-  --mode train \
-  --include_cot true \
-  --lora_path ./outputs/stage1_no_cot/lora_weights \
-  --projector_path ./outputs/stage1_no_cot/projector.pt \
-  --output_dir ./outputs/stage2_with_cot \
-  --batch_size 2 \
-  --epochs 3
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
 accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
-  --lora_path ./outputs/stage2_with_cot/lora_weights \
-  --projector_path ./outputs/stage2_with_cot/projector.pt \
-  --output_dir ./outputs/stage3 \
+  --training_stage 2 \
+  --epochs_per_stage 3 \
+  --lora_path ./outputs/stage1/stage1/lora_weights \
+  --projector_path ./outputs/stage1/stage1/mm_projector.pt \
+  --output_dir ./outputs/stage2 \
+  --batch_size 2 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
+
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
+  --training_stage 3 \
   --epochs_per_stage 3 \
   --max_latent_stage 7 \
-  --c_thought 2
+  --c_thought 2 \
+  --lora_path ./outputs/stage2/stage2/lora_weights \
+  --projector_path ./outputs/stage2/stage2/mm_projector.pt \
+  --output_dir ./outputs/stage3 \
+  --batch_size 2 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
 ```
 
