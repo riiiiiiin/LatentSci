@@ -573,21 +573,24 @@ def train_sft_lora(
             wandb.finish(exit_code=1)
         raise
 
-# 加载LoRA模型进行推理
 def load_lora_model_for_inference(
     base_model_path=None,
     lora_weights_path="./qwen3_mol_sft_lora_results/lora_weights",
     projector_path="./qwen3_mol_sft_lora_results/projector.pt",
     merge_lora=True,
-    device="cuda" if torch.cuda.is_available() else "cpu",
-    mol_config=None  # 新增：分子配置
+    mol_config=None,
+    accelerator: Accelerator = None,   # <- 新增：可选地传入 accelerate 实例
 ):
     """
-    加载LoRA微调的模型进行推理 - 修复设备一致性
+    在 CPU 上安全地加载基础模型与 LoRA 权重（使用 main_process_first 避免重复 I/O），
+    然后返回未移动到具体 GPU 的模型与 tokenizer。调用端应使用 accelerator.prepare(model)
+    来把模型移动到每个进程对应的设备。
+
+    如果传入了 accelerator，则使用 accelerator.main_process_first() 管理加载阶段。
     """
     if base_model_path is None:
         base_model_path = ModelConfig.DEFAULT_QWEN_PATH
-    
+
     if mol_config is None:
         mol_config = {
             'num_queries': ModelConfig.NUM_QUERIES,
@@ -595,60 +598,62 @@ def load_lora_model_for_inference(
             'num_heads': ModelConfig.NUM_HEADS
         }
 
-    logger.info(f"Loading LoRA model for inference on {device}...")
-    
-    # 1. 加载基础模型，传入 mol_config
-    model = Qwen3MoleculeLLM(qwen_model_name=base_model_path, mol_config=mol_config)
-    tokenizer = model.tokenizer
-    
-    # 2. 确保pad_token设置
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    # 3. 将模型移动到指定设备
-    model = model.to(device)
-    
-    # 4. 加载LoRA权重
-    from peft import PeftModel
-    model.model = PeftModel.from_pretrained(model.model, lora_weights_path)
-    
-    # 5. 合并LoRA权重（可选，用于更快推理）
-    if merge_lora:
-        logger.info("Merging LoRA weights for faster inference...")
-        model.model = model.model.merge_and_unload()
-    
-    # 6. 加载投影器权重并确保在正确设备上
-    if os.path.exists(projector_path):
-        # 加载时指定map_location
-        projector_state_dict = torch.load(projector_path, map_location=device)
-        model.projector.load_state_dict(projector_state_dict)
-        # 确保投影器在正确设备上
-        model.projector = model.projector.to(device)
-        logger.info(f"Loaded projector weights to {device} from: {projector_path}")
-    
-    # 7. 确保模型各部分都在同一设备上
-    model = model.to(device)
-    
-    # 8. 检查设备一致性
-    model_devices = set()
-    for name, param in model.named_parameters():
-        model_devices.add(str(param.device))
-    
-    if len(model_devices) > 1:
-        logger.warning(f"Model parameters are on multiple devices: {model_devices}")
-        # 强制统一设备
-        model = model.to(device)
-    
-    logger.info(f"Model loaded successfully on {device}")
-    
-    # 9. 设置为评估模式
-    model.eval()
-    
-    return model, tokenizer
+    logger.info(f"Preparing to load LoRA model from {base_model_path} with LoRA weights {lora_weights_path}")
 
-# ------------------------------
-# 以下为 inference / eval 相关替换部分
-# ------------------------------
+    # 如果调用方没有传 accelerator，我们仍然会在本函数内创建一个（但推荐调用方传入）
+    created_accelerator = False
+    if accelerator is None:
+        accelerator = Accelerator()
+        created_accelerator = True
+
+    # 在主进程先进行模型/权重文件的磁盘 I/O，防止 N 个进程同时读同一文件
+    with accelerator.main_process_first():
+        # 1) 在 CPU 上实例化基础模型（确保不会自动放到 GPU）
+        # 如果 Qwen3MoleculeLLM 会将模型自动移动到 cuda，确保其构造/加载时使用 map_location='cpu' 或立刻 .to('cpu')
+        model = Qwen3MoleculeLLM(qwen_model_name=base_model_path, mol_config=mol_config)
+        tokenizer = model.tokenizer
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # 强制移动到 CPU（以防某些构造会默认放到 GPU）
+        model = model.to(torch.device("cpu"))
+
+        # 2) 加载 LoRA 权重到 CPU（尽量避免直接落到单一 GPU）
+        # 使用 device_map 或 map_location='cpu'，以确保权重先加载到 CPU，再交给 accelerate 分配到各自设备
+        try:
+            # 尝试使用 device_map 将权重加载到 CPU（PEFT / HF 兼容）
+            model.model = PeftModel.from_pretrained(model.model, lora_weights_path, device_map={"": "cpu"})
+        except Exception as e:
+            logger.warning(f"PeftModel.from_pretrained with device_map failed: {e}; retrying with map to cpu via torch.load if available.")
+            # 作为后备：尝试加载 state_dict 并手动加载（取决于你的 LoRA 权重存储形式）
+            # 这里假定 lora_weights_path 是一个目录，PeftModel.from_pretrained 通常能处理；所以这只是兜底。
+            model.model = PeftModel.from_pretrained(model.model, lora_weights_path, device_map={"": "cpu"})
+
+        # 3) 可选：合并 LoRA（合并在 CPU 上进行，避免大量 GPU 内存占用）
+        if merge_lora:
+            logger.info("Merging LoRA weights on CPU for faster inference...")
+            model.model = model.model.merge_and_unload()
+
+        # 4) 加载 projector 权重到 CPU（如果存在）
+        if os.path.exists(projector_path):
+            projector_state_dict = torch.load(projector_path, map_location="cpu")
+            model.projector.load_state_dict(projector_state_dict)
+            model.projector = model.projector.to(torch.device("cpu"))
+            logger.info(f"Loaded projector (CPU) from {projector_path}")
+
+    # 等待所有进程完成主进程加载阶段
+    accelerator.wait_for_everyone()
+
+    # 返回模型（当前放在 CPU 上），调用者应使用 accelerator.prepare(model) 将它移动到各自设备
+    # 如果我们在此函数内创建了 accelerator，需要提醒调用者他们没有传入 accelerator（但返回模型依然放 CPU）
+    if created_accelerator:
+        # 关闭本地 accelerator（可选）——通常更好的方式是由调用者统一管理 accelerator 生命周期
+        # 这里不做额外处理，仅记录
+        logger.debug("Note: load_lora_model_for_inference created an internal Accelerator; "
+                     "it's recommended to create and pass Accelerator from caller for full control.")
+    logger.info("Model loaded on CPU and ready for accelerator.prepare()")
+    model.eval()
+    return model, tokenizer
 
 def load_test_data(test_data_path, max_len=None):
     """
@@ -669,79 +674,85 @@ def load_test_data(test_data_path, max_len=None):
         dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, exclude_tasks=['rcr', 'mechsel'], max_len=max_len)
         logger.info(f"Loaded tokenized eval dataset from dir: {len(dataset)} examples")
         return dataset
-    
+
+# ------------------------------------------------------------
+# 重写：运行推理，正确使用 accelerate 分配设备
+# ------------------------------------------------------------
 def run_inference_on_test_data(
-    model,
-    tokenizer,
-    test_data_path,
+    base_model_path=None,
+    lora_weights_path="./qwen3_mol_sft_lora_results/lora_weights",
+    projector_path="./qwen3_mol_sft_lora_results/projector.pt",
+    merge_lora=True,
+    test_data_path=None,
     max_new_tokens=2048,
     temperature=0.7,
     top_p=0.9,
-    device=None,                # 当用 accelerate 时忽略手动设备（会由 Accelerator 管理）
     save_results_path=None,
-    batch_size=1,               # 仍以 sample-level 为主
+    batch_size=1,
     max_samples=None,
-    tokenization_max_len=None
+    tokenization_max_len=None,
+    mol_config=None,
+    accelerator: Accelerator = None,   # <- 新增：可选地传入 accelerate 实例
 ):
     """
-    使用 accelerate 进行 sample-level 的多GPU并行推理。
-
-    注意:
-      - 请用 `accelerate launch script.py` 来运行包含此函数的脚本，或在 accelerate 已配置的环境中调用。
-      - 该实现通过将样本索引按 process_index 切片分配给不同进程（idx % num_processes）来实现并行。
-      - 只有主进程 (process_index == 0) 会合并并写出最终的 save_results_path 文件并返回完整结果列表。
-        其他进程会返回其本地的 partial results（列表）。
+    使用 accelerate 在多进程（多 GPU）上做 sample-level 推理的主流程。
+    关键点：
+      - 在开始时创建 Accelerator；
+      - 在主进程先加载模型与权重（CPU 上），然后使用 accelerator.prepare(model) 将模型移动到每个进程自己的设备。
+      - 使用 accelerator.main_process_first() 与 accelerator.wait_for_everyone() 做 I/O 同步。
     """
-    logger.info(f"Running inference on test data from {test_data_path}")
-    logger.info(f"Max new tokens: {max_new_tokens}")
+    if test_data_path is None:
+        raise ValueError("test_data_path must be provided")
 
-    # 初始化 accelerator
-    accelerator = Accelerator()
+    logger.info(f"Starting accelerated inference on {test_data_path}")
+    if not accelerator:
+        accelerator = Accelerator()
     proc_index = accelerator.process_index
     num_procs = accelerator.num_processes
 
-    # 由 accelerator 管理日志输出（避免跨进程乱输出）
     def aprint(*args, **kwargs):
-        # 仅主进程默认打印；如果需要每个进程打印可改条件
         if accelerator.is_main_process:
             logger.info(" ".join(map(str, args)))
         else:
-            # 仍使用 logger.debug 避免太多冗余主日志
             logger.debug(f"proc{proc_index} - " + " ".join(map(str, args)))
 
     aprint(f"Accelerate process {proc_index}/{num_procs} started. Device: {accelerator.device}")
 
-    # 加载并 tokenized 的 eval dataset（与你原先的 load_test_data 保持一致）
-    dataset = load_test_data(test_data_path, max_len=tokenization_max_len)
+    # ---- 由 accelerator 管理的加载阶段：主进程先加载模型到 CPU，其他进程等待 ----
+    model, tokenizer = load_lora_model_for_inference(
+        base_model_path=base_model_path,
+        lora_weights_path=lora_weights_path,
+        projector_path=projector_path,
+        merge_lora=merge_lora,
+        mol_config=mol_config,
+        accelerator=accelerator,   # 关键：把 accelerator 传入 load 函数以使用 main_process_first
+    )
 
-    # 限制样本数量
-    if max_samples is not None and max_samples < len(dataset):
-        dataset = dataset.select(range(max_samples))
-
-    total_samples = len(dataset)
-    aprint(f"Total eval samples: {total_samples} (process {proc_index} will take ~1/{num_procs})")
-
-    # 让 accelerator 管理模型的设备（prepare 不改变模型行为，但便于后续一致）
-    model.eval()
-    # 将模型移动到 accelerator 管理的设备（accelerator.prepare 也可接 dataloader 等）
+    # 把模型交给 accelerator 以将其移动到各自进程对应的设备（每个进程的 accelerator.device）
+    # 注意：accelerator.prepare 也可用于 dataloader 等，但此处只对模型使用
     model = accelerator.prepare(model)
 
-    local_results = []
+    # 确保 eval 模式
+    model.eval()
 
-    # 分配给当前进程的样本索引（按顺序分配： start=proc_index, step=num_procs）
+    # 加载数据（使用你原先的 load_test_data）
+    dataset = load_test_data(test_data_path, max_len=tokenization_max_len)
+    if max_samples is not None and max_samples < len(dataset):
+        dataset = dataset.select(range(max_samples))
+    total_samples = len(dataset)
+    aprint(f"Total eval samples: {total_samples}")
+
+    # 分配索引
     assigned_indices = list(range(proc_index, total_samples, num_procs))
     aprint(f"Process {proc_index}: assigned {len(assigned_indices)} samples")
 
-    # 逐样本推理（保持原有逐个样本日志/错误捕获）
+    local_results = []
     for local_i, idx in enumerate(tqdm(assigned_indices, desc=f"proc{proc_index}", disable=False)):
-        item = dataset[idx]  # 已包含: input_ids (list[int]), attention_mask (list[int]), labels (None), smiles (list[str])
-
+        item = dataset[idx]
         try:
             smiles_list = item.get("smiles", []) or []
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
 
-            # 构造 tensor inputs（单样本）
-            # 注意：使用 accelerator.device 确保放到正确设备
             input_ids = torch.tensor(item["input_ids"], dtype=torch.long).unsqueeze(0).to(accelerator.device)
             attention_mask = torch.tensor(item["attention_mask"], dtype=torch.long).unsqueeze(0).to(accelerator.device)
 
@@ -757,24 +768,22 @@ def run_inference_on_test_data(
                 )
 
             gen0 = generated_ids[0]
-            # 如果生成结果是 tensor，先把它移到 CPU（accelerator 会自动处理，但为保险起见）
             if isinstance(gen0, torch.Tensor):
-                gen0_cpu = accelerator.gather(gen0.unsqueeze(0))[0] if num_procs > 1 else gen0.cpu()
+                # 如果多进程需要跨进程收集，可以使用 accelerator.gather，但这里只需要把 tensor 转 CPU
+                gen0_cpu = gen0.cpu()
                 generated_text = tokenizer.decode(gen0_cpu, skip_special_tokens=True)
             else:
-                # 某些模型返回 list[int] / numpy array
                 try:
                     generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
                 except Exception:
                     generated_text = str(gen0)
 
-            result = {
+            local_results.append({
                 "sample_id": idx,
                 "smiles": smiles_list,
                 "result": generated_text.strip(),
                 "task": item.get("task", None)
-            }
-            local_results.append(result)
+            })
 
         except Exception as e:
             logger.error(f"Error processing sample {idx} on proc {proc_index}: {e}")
@@ -787,18 +796,15 @@ def run_inference_on_test_data(
                 "task": item.get("task", None)
             })
 
-        # 释放显存（按需）
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 每个进程把自己局部结果写到磁盘（主进程稍后合并）
-    # 构造部分文件路径（使用 save_results_path 的目录，如果没有则 tmp dir）
+    # 每进程写部分文件
     if save_results_path:
         base_dir = os.path.dirname(save_results_path) if os.path.dirname(save_results_path) else "."
         os.makedirs(base_dir, exist_ok=True)
         part_prefix = os.path.join(base_dir, os.path.basename(save_results_path))
     else:
-        # 无 save path，写到临时目录
         tmpdir = tempfile.gettempdir()
         ts = int(time.time() * 1000)
         part_prefix = os.path.join(tmpdir, f"accelerate_inference_{ts}")
@@ -813,13 +819,12 @@ def run_inference_on_test_data(
 
     aprint(f"Process {proc_index} wrote partial results to {part_path}")
 
-    # 等待所有进程完成写文件
+    # 等待所有进程写完
     accelerator.wait_for_everyone()
 
-    # 主进程合并所有 parts
+    # 主进程合并
     if accelerator.is_main_process:
         merged = []
-        # 查找所有 part 文件（proc 0..num_procs-1）
         part_files = []
         for p in range(num_procs):
             candidate = f"{part_prefix}.part{p}.json"
@@ -828,7 +833,6 @@ def run_inference_on_test_data(
             else:
                 logger.warning(f"Expected part file missing: {candidate}")
 
-        # 读取并合并
         for pf in part_files:
             try:
                 with open(pf, "r", encoding="utf-8") as f:
@@ -838,19 +842,11 @@ def run_inference_on_test_data(
                 logger.error(f"Failed to read part file {pf}: {e}")
                 logger.error(traceback.format_exc())
 
-        # 按 sample_id 排序以恢复原始顺序
         merged_sorted = sorted(merged, key=lambda x: x.get("sample_id", -1))
 
-        # 如果需要保存最终结果（当用户提供 save_results_path 时，覆盖为最终文件）
-        if save_results_path:
-            save_file = save_results_path
-        else:
-            # 当用户未指定保存路径，主进程也会把合并结果写到一个临时文件并告知路径
-            save_file = f"{part_prefix}.merged.json"
+        save_file = save_results_path if save_results_path else f"{part_prefix}.merged.json"
 
-        # 生成 metadata + 保存
         try:
-            # 统计参数（使用 accelerator.unwrap_model 获取真实模型）
             try:
                 real_model = accelerator.unwrap_model(model)
             except Exception:
@@ -882,19 +878,16 @@ def run_inference_on_test_data(
             logger.error(f"Failed to save merged results: {e}")
             logger.error(traceback.format_exc())
 
-        # 清理部分文件（可选）
+        # 清理部分文件
         for pf in part_files:
             try:
                 os.remove(pf)
             except Exception:
                 pass
 
-        logger.info(f"\n{'='*60}")
         logger.info(f"Inference completed on {len(merged_sorted)} samples (merged).")
         return merged_sorted
-
     else:
-        # 非主进程仅返回本进程的本地结果（若脚本是由 accelerate launch 调用，通常主进程会是使用者关心的）
         return local_results
 
 # 主函数 - 修改以支持第二轮训练
@@ -983,11 +976,14 @@ if __name__ == "__main__":
             timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
 
+        accelerator = Accelerator()
+        
         model, tokenizer = load_lora_model_for_inference(
             base_model_path=None,
             lora_weights_path=lora_path,
             projector_path=projector_path,
-            mol_config=mol_config
+            mol_config=mol_config,
+            accelerator=accelerator,
         )
 
         # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
@@ -1000,7 +996,8 @@ if __name__ == "__main__":
             top_p=args.top_p,
             save_results_path=results_path,
             max_samples=args.max_test_samples,
-            tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN)
+            tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN),
+            accelerator=accelerator,
         )
 
         logger.info("Inference completed!")
