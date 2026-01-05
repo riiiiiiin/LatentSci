@@ -23,7 +23,7 @@ build_grouped_save_data(result_path, "./logs", log_name)
 moledit_results = evaluate_moledit_score(log_name, f'{dataset_path}/mol_edit')
 molopt_results = evaluate_molopt_score(log_name, f'{dataset_path}/mol_opt')
 molund_results = evaluate_molund_score(log_name, f'{dataset_path}/mol_und')
-rxn_results = evaluate_rxn_score(log_name, f'{dataset_path}/mol_rxn')
+rxn_results = evaluate_rxn_score(log_name, f'{dataset_path}/rxn')
 
 all_results = {
     'moledit': moledit_results,
