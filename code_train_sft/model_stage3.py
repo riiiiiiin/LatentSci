@@ -131,7 +131,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
     def __init__(self, 
                  qwen_model_name,
                  mol_config,       # 🚨 必须传入配置字典
-                 device_map=None):
+                 device_map=None,
+                 torch_dtype=torch.bfloat16):
         """
         分子-文本多模态大语言模型
         
@@ -162,12 +163,17 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 加载基础语言模型
         self.model = AutoModelForCausalLM.from_pretrained(
             qwen_model_name,
-            torch_dtype=torch.float32,
+            # IMPORTANT: fp32 doubles memory and will OOM easily for 8B models under GRPO.
+            # Default to bf16 (good on Ampere/Hopper). Callers can override via `torch_dtype=...`.
+            torch_dtype=torch_dtype,
             device_map=device_map
         )
         
         # 调整词表大小以包含新添加的特殊标记
-        self.model.resize_token_embeddings(len(self.tokenizer))
+        # 注意：我们使用 max() 确保词表大小不小于原始 config 中的 vocab_size，
+        # 这样可以保持与 vLLM (加载原始 config.json) 的兼容性，避免权重加载时的 AssertionError。
+        new_vocab_size = max(len(self.tokenizer), self.model.config.vocab_size)
+        self.model.resize_token_embeddings(new_vocab_size)
         
         # 获取特殊标记的ID
         self.start_id = self.tokenizer.convert_tokens_to_ids("<mol_start>")
@@ -204,6 +210,30 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # ---- Stage 3: Bio Token Updater ----
         self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
         self.bio_updater.to(self.model.dtype)
+
+    # ---- Liger Kernel & Compatibility Helpers ----
+    def _get_actual_llm(self):
+        """Helper to get the underlying ForCausalLM model, even if wrapped in Peft."""
+        llm = self.model
+        if hasattr(llm, "base_model") and hasattr(llm.base_model, "model"):
+            return llm.base_model.model
+        return llm
+
+    @property
+    def norm(self):
+        return self._get_actual_llm().model.norm
+
+    @property
+    def layers(self):
+        return self._get_actual_llm().model.layers
+
+    @property
+    def embed_tokens(self):
+        return self._get_actual_llm().model.embed_tokens
+
+    @property
+    def lm_head(self):
+        return self._get_actual_llm().lm_head
 
     def gradient_checkpointing_enable(self, **kwargs):
         """

@@ -136,6 +136,8 @@ class RepeatSampler(Sampler):
         batch_size: Optional[int] = None,
         shuffle: bool = False,
         seed: Optional[int] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self.data_source = data_source
         self.mini_repeat_count = mini_repeat_count
@@ -143,6 +145,11 @@ class RepeatSampler(Sampler):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
+        self.rank = rank
+        self.world_size = world_size
+        # Add attributes to mimic DistributedSampler for accelerate
+        self.num_replicas = world_size
+        # rank is already set above
 
     def __iter__(self):
         n = len(self.data_source)
@@ -154,26 +161,37 @@ class RepeatSampler(Sampler):
                 g.manual_seed(self.seed)
             indices = torch.as_tensor(indices)[torch.randperm(n, generator=g)].tolist()
 
-        # Repeat indices
-        repeated_indices = []
-        for i in indices:
-            repeated_indices.extend([i] * self.mini_repeat_count)
+        # Shard the indices before repeating them
+        # Each GPU processes a distinct subset of unique prompts
+        indices = indices[self.rank : n : self.world_size]
 
-        final_indices = repeated_indices * self.repeat_count
+        # Group by generation unit to ensure synchronous repeats
+        # We repeat at the batch level so the DataLoader and Trainer stay in sync
+        final_indices = []
+        batch_size = max(1, self.batch_size) # unique prompts per generation unit
+        for i in range(0, len(indices), batch_size):
+            batch = indices[i : i + batch_size]
+            
+            # Expand each unique prompt by mini_repeat_count (num_generations)
+            expanded = []
+            for idx in batch:
+                expanded.extend([idx] * self.mini_repeat_count)
+            
+            # Repeat this entire generation group for multiple iterations/steps
+            for _ in range(self.repeat_count):
+                final_indices.extend(expanded)
+                
         return iter(final_indices)
 
     def __len__(self):
-        return len(self.data_source) * self.mini_repeat_count * self.repeat_count
+        # Adjusted length for sharding
+        n = len(self.data_source)
+        # Number of unique prompts this rank handles
+        num_unique = (n - self.rank + self.world_size - 1) // self.world_size
+        return num_unique * self.mini_repeat_count * self.repeat_count
 
 
-# vLLM is optional; do not hard-require TRL's optional helpers at import time because TRL versions vary.
-try:  # pragma: no cover
-    from vllm import LLM, SamplingParams
-    _HAS_VLLM = True
-except Exception:  # pragma: no cover
-    LLM = None  # type: ignore
-    SamplingParams = None  # type: ignore
-    _HAS_VLLM = False
+# vLLM is optional.
 
 
 def qwen_mol_grpo_collate_fn(
@@ -261,9 +279,6 @@ def _split_batch_dict(d: Dict[str, Any], num_splits: int) -> List[Dict[str, Any]
 class QwenMoleculeGRPOTrainer(Trainer):
     """
     GRPO trainer specialized for Bio-LatentCOT's `Qwen3MoleculeLLM`.
-
-    Note:
-    - vLLM paths are intentionally not supported here (this keeps the fork small and robust).
     """
 
     def __init__(
@@ -375,6 +390,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
         self.vllm_server_base_url = getattr(args, "vllm_server_base_url", None)
         self.vllm_server_timeout = float(getattr(args, "vllm_server_timeout", 60.0))
         self.vllm_ckpt = getattr(args, "vllm_ckpt", None)
+        self.vllm_max_model_len = int(getattr(args, "vllm_max_model_len", 4096))
         self.scale_rewards = getattr(args, "scale_rewards", "none")
         self.importance_sampling_level = getattr(args, "importance_sampling_level", 0)
         self.mask_truncated_completions = getattr(args, "mask_truncated_completions", False)
@@ -456,6 +472,45 @@ class QwenMoleculeGRPOTrainer(Trainer):
             self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
 
         # ---------------------------------------------------------
+        # Optional Liger Kernel init
+        # ---------------------------------------------------------
+        if getattr(args, "use_liger_manual", False):
+            try:
+                # Try new Liger Kernel API first
+                try:
+                    from liger_kernel.transformers import patch_liger as patch_func
+                except ImportError:
+                    from liger_kernel.transformers import _apply_liger_kernel_to_instance as patch_func
+
+                # We patch the underlying LLM, not the wrapper, to avoid breaking 
+                # the wrapper's custom forward (molecule fusion) logic.
+                wrapper = self.accelerator.unwrap_model(self.model)
+                
+                # If it's our custom wrapper, use the helper to get the real ForCausalLM.
+                # Otherwise fall back to .model or the wrapper itself.
+                if hasattr(wrapper, "_get_actual_llm"):
+                    inner_model = wrapper._get_actual_llm()
+                else:
+                    inner_model = getattr(wrapper, "model", wrapper)
+
+                # IMPORTANT: If inner_model is a PeftModel, we MUST patch its base_model (the ForCausalLM).
+                # Otherwise Liger's lce_forward will call PeftModel.model(...) which returns logits, 
+                # causing shape mismatch when lce_forward then calls lm_head(logits).
+                if hasattr(inner_model, "base_model") and hasattr(inner_model.base_model, "model"):
+                    target_to_patch = inner_model.base_model.model
+                else:
+                    target_to_patch = inner_model
+
+                logger.info(f"Applying Liger Kernel to: {type(target_to_patch).__name__}")
+                try:
+                    patch_func(model=target_to_patch)
+                except TypeError:
+                    patch_func(target_to_patch)
+                logger.info("Liger Kernel applied successfully.")
+            except Exception as e:
+                logger.warning(f"Failed to apply Liger Kernel: {e}")
+
+        # ---------------------------------------------------------
         # Optional vLLM init
         # ---------------------------------------------------------
         self.llm = None
@@ -464,8 +519,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
         self.tp_group = None
 
         if self.use_vllm:
-            if not _HAS_VLLM:
-                raise ImportError("vLLM is not available but `use_vllm=True`. Please `pip install vllm`.")
+            # Import vLLM only when needed to show the real error if it's broken
+            from vllm import LLM
 
             # Server mode uses a vLLM HTTP server; colocate mode runs vLLM inside the training workers.
             if self.vllm_mode == "server":
@@ -503,12 +558,13 @@ class QwenMoleculeGRPOTrainer(Trainer):
 
                 # vLLM will be loaded from a checkpoint path (or model name).
                 vllm_model_id = self.vllm_ckpt or self.model.config._name_or_path
-                vllm_max_num_seqs = args.per_device_train_batch_size * self.vllm_tensor_parallel_size * getattr(args, "steps_per_generation", 1)
+                vllm_max_num_seqs = self.num_generations * args.per_device_train_batch_size * self.vllm_tensor_parallel_size * getattr(args, "steps_per_generation", 1)
                 self.llm = LLM(
                     model=vllm_model_id,
                     tensor_parallel_size=self.vllm_tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_gpu_memory_utilization,
                     max_num_seqs=vllm_max_num_seqs,
+                    max_model_len=self.vllm_max_model_len,
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index // self.vllm_tensor_parallel_size,
                     enable_prompt_embeds=True,
@@ -605,7 +661,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
             data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
 
         dataloader_params = {
-            "batch_size": self._train_batch_size * getattr(self.args, "steps_per_generation", 1),
+            "batch_size": self._train_batch_size * self.num_generations * getattr(self.args, "steps_per_generation", 1),
             "collate_fn": data_collator,
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
@@ -625,15 +681,25 @@ class QwenMoleculeGRPOTrainer(Trainer):
     def _get_train_sampler(self, dataset: Optional[Dataset] = None) -> Sampler:
         if dataset is None:
             dataset = self.train_dataset
-        gen_bs = getattr(self.args, "generation_batch_size", self.args.per_device_train_batch_size * self.num_generations)
+        
+        # Unique prompts per generation unit
+        prompts_per_step = self.args.per_device_train_batch_size
         steps_per_gen = getattr(self.args, "steps_per_generation", 1)
+        unique_per_gen = prompts_per_step * steps_per_gen
+        
+        # Total repeats needed to keep DataLoader in sync with buffering logic
+        # We need to repeat the same prompts for every iteration AND every buffered step
+        total_repeats = self.num_iterations * steps_per_gen
+        
         return RepeatSampler(
             data_source=dataset,
             mini_repeat_count=self.num_generations,
-            batch_size=gen_bs // self.num_generations,
-            repeat_count=self.num_iterations * steps_per_gen,
-            shuffle=True,  # Default to True for training
+            batch_size=unique_per_gen,
+            repeat_count=total_repeats,
+            shuffle=True,
             seed=self.args.seed,
+            rank=self.accelerator.process_index,
+            world_size=self.accelerator.num_processes,
         )
 
     def _compute_logps_single_batch(
@@ -908,6 +974,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
             # Trim padding per sample and feed vLLM prompt_embeds
             embed_list = [prompt_embeds[i][prompt_attn[i].bool()].contiguous() for i in range(prompt_embeds.size(0))]
 
+            from vllm import SamplingParams
+
             sampling_params = SamplingParams(
                 n=1,
                 repetition_penalty=self.repetition_penalty,
@@ -1020,7 +1088,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
 
         mode = "train" if self.model.training else "eval"
         batch_size = (
-            (self.args.per_device_train_batch_size * self.args.steps_per_generation)
+            (self.args.per_device_train_batch_size * self.num_generations * self.args.steps_per_generation)
             if mode == "train"
             else self.args.per_device_eval_batch_size
         )

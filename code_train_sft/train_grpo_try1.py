@@ -126,6 +126,7 @@ def main():
 
     # Efficiency
     parser.add_argument("--use_liger", action="store_true", help="Use Liger Kernel for memory efficient training.")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing to save memory.")
 
     # vLLM
     parser.add_argument("--use_vllm", action="store_true")
@@ -133,6 +134,7 @@ def main():
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_ckpt", type=str, default=None, help="Optional vLLM model path/name (defaults to model path).")
+    parser.add_argument("--vllm_max_model_len", type=int, default=4096, help="Maximum model length for vLLM engine.")
 
     args = parser.parse_args()
 
@@ -171,6 +173,9 @@ def main():
         save_steps=200,
         save_total_limit=2,
         bf16=True,
+        gradient_checkpointing=args.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if args.gradient_checkpointing else None,
+        ddp_find_unused_parameters=True,
         remove_unused_columns=False,
         report_to="none",
         seed=args.seed,
@@ -182,14 +187,18 @@ def main():
         temperature=args.temperature,
         use_vllm=args.use_vllm,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        use_liger_kernel=args.use_liger,
+        # We handle Liger Kernel manually in QwenMoleculeGRPOTrainer 
+        # to ensure it targets the inner model, not the wrapper.
+        use_liger_kernel=False,
     )
     # Set extra attributes that our custom trainer uses but 0.15.2 config might not have
+    setattr(grpo_args, "use_liger_manual", args.use_liger)
     setattr(grpo_args, "num_iterations", args.num_iterations)
     setattr(grpo_args, "steps_per_generation", args.steps_per_generation)
     setattr(grpo_args, "vllm_mode", args.vllm_mode)
     setattr(grpo_args, "vllm_tensor_parallel_size", args.vllm_tensor_parallel_size)
     setattr(grpo_args, "vllm_ckpt", args.vllm_ckpt)
+    setattr(grpo_args, "vllm_max_model_len", args.vllm_max_model_len)
     setattr(grpo_args, "epsilon_high", args.epsilon) # for 0.15.2 consistency
     setattr(grpo_args, "epsilon", args.epsilon)
     setattr(grpo_args, "top_p", args.top_p)
