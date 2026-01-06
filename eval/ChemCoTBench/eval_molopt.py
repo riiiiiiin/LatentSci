@@ -1,17 +1,37 @@
 import json
-from eval.eval_molopt import eval_molopt_from_list
-from eval.utils import extract_answer
-import logging
 import os
+import logging
+from tqdm import tqdm
+from ChemCoTBench.core.eval_metric import mol_opt_evaluater
+from ChemCoTBench.core.utils import extract_answer
 
-logger = logging.getLogger(__name__)
-
+def eval_molopt_from_list(optimized_prop, gt_list, pred_list, total_number):
+    # this_function input: 
+    #   gt_list for gt_molecules
+    #   pred_list for pred_molecules
+    #   total_number: len(gt_molecules)+len(cases that cannot extract SMILES)
+    
+    prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
+    prop_evaluater = mol_opt_evaluater(prop=prop_dict[optimized_prop])
+    
+    improve_statistic = prop_evaluater.property_improvement(src_mol_list=gt_list, tgt_mol_list=pred_list, total_num=total_number)
+    scaffold_hard, scaffold_soft = prop_evaluater.scaffold_consistency(src_mol_list=gt_list, tgt_mol_list=pred_list)
+    
+    result_dict = dict(
+        improvement=improve_statistic,
+        scaffold=dict(hard=scaffold_hard/total_number, soft=scaffold_soft/total_number),
+    )
+    
+    return result_dict
+    
 def evaluate_molopt_score(model_name, gt_path):
     ## 在get_molopt_cot中得到test结果, 我们评测这些test结果
     prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
     # prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', gsk='gsk3b')
     
     result_final = dict()
+    
+    logger = logging.getLogger(__name__)
     
     for prop in prop_dict.keys():
         logger.info(f'evaluating {prop} for model {model_name}')

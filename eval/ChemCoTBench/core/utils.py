@@ -1,4 +1,3 @@
-# %%
 import json
 import regex as re
 
@@ -49,7 +48,6 @@ def tranform_str_to_json(str_input):
 
     processed = _replace_outputs(json_obj)
     return processed
-# %%
 
 answer_pattern = re.compile(r'<answer\s*>(.*?)</answer\s*>', flags=re.S)
 
@@ -57,3 +55,17 @@ def extract_answer(str_input):
     matches = re.findall(answer_pattern, str_input)
     last_content = matches[-1].strip() if matches else None
     return last_content
+
+def _combine_list(raw):
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                raw = '.'.join(parsed)
+            # 如果解析成功但不是 list，什么都不做
+        except (json.JSONDecodeError, TypeError):
+            # 不能解析为 JSON，什么都不做
+            pass
+    elif isinstance(raw, list):
+        raw = '.'.join(raw)
+    return raw

@@ -1,17 +1,9 @@
 
 import json
-from eval.eval_metric import mol_opt_evaluater
-
-def check_string_type(s):
-    try:
-        int(s)
-        return "int"
-    except ValueError:
-        try:
-            float(s)
-            return "float"
-        except ValueError:
-            return "string"
+import os
+import logging
+from ChemCoTBench.core.eval_metric import mol_opt_evaluater
+from ChemCoTBench.core.utils import extract_answer
 
 def eval_molund_from_list(gt_list, pred_list, total_number, task):
     # this_function input: 
@@ -51,4 +43,42 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     }
     
     return my_dict
+    
+def evaluate_molund_score(model_name, gt_path):
+    logger = logging.getLogger(__name__)
+    task_dict = dict(
+        fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',
+        ring_system='ring_system_scaffold', equivalence = 'equivalence'
+    )
+    
+    result_dict = dict()
+    
+    for task in task_dict.keys():
+        logger.info(f'evaluating {task} for model {model_name}')
+        if 'llama' not in model_name:
+            file_name = f"logs/{task_dict[task]}/{model_name}.json"
             
+        pred_results = json.load(open(file_name, "r"))
+        invalid_number = 0
+        
+        gt_name = f"{gt_path}/{task_dict[task]}.json"
+        gts = json.load(open(gt_name, "r"))
+        
+        pred_list, gt_list = list(), list()
+        for i, pred in enumerate(pred_results):
+            answer = extract_answer(pred['result'])
+            if answer is None:
+                invalid_number += 1
+                continue
+            pred_list.append(answer)
+            gt_list.append(gts[i]['gt'])
+        
+        assert len(pred_results) == invalid_number+len(pred_list)
+        result_dict[task] = eval_molund_from_list(gt_list=gt_list, pred_list=pred_list, total_number=len(pred_results), task=task)
+        logger.debug(model_name, task, result_dict[task])
+    
+    logger.info(f"eval_score_{model_name}_molund:\n\r{result_dict}")
+    os.makedirs("results/molund", exist_ok=True)
+    json.dump(result_dict, open(f"results/molund/eval_score_{model_name}.json", "w"), indent=4)
+    
+    return result_dict        

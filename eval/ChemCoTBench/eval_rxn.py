@@ -1,10 +1,10 @@
 import sys, re, os, json
-from .rxnutils import read_json, is_valid_smiles
-from eval.utils import extract_answer
+from ChemCoTBench.rxn.rxnutils import read_json, is_valid_smiles
+from ChemCoTBench.core.utils import extract_answer
 import logging
 import os
 
-from .evaluator import MoleculeSMILESEvaluator
+from .rxn.evaluator import MoleculeSMILESEvaluator
 evaluator = MoleculeSMILESEvaluator()
 logger = logging.getLogger(__name__)
 
@@ -16,20 +16,6 @@ subtask_to_result_key = {
     "byproduct": "Byproduct(s)",
     "retro": "Reactants"
 }
-
-def _combine_list(raw):
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                raw = '.'.join(parsed)
-            # 如果解析成功但不是 list，什么都不做
-        except (json.JSONDecodeError, TypeError):
-            # 不能解析为 JSON，什么都不做
-            pass
-    elif isinstance(raw, list):
-        raw = '.'.join(raw)
-    return raw
 
 def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir: str = None):
     if log_dir is None:
