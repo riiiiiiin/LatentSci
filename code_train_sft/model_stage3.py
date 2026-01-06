@@ -299,6 +299,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             # 识别当前 Pass 需要更新 latent feedback 的 Batch 索引
             feedback_indices = [b for b in range(B) if len(latent_positions[b]) > pass_idx]
             if feedback_indices:
+                device = initial_embeds.device
                 pos_indices = torch.tensor([latent_positions[b][pass_idx] for b in feedback_indices], device=device)
                 valid_mask = pos_indices > 0
                 if valid_mask.any():

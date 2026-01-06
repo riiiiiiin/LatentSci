@@ -11,8 +11,7 @@ from config import ModelConfig
 from dataloader import load_grpo_data
 from model_stage3 import Qwen3MoleculeLLM
 from trainer.grpo_trainer import QwenMoleculeGRPOTrainer
-
-from trl import GRPOConfig
+from trainer.grpo_config import GRPOConfig
 
 
 logging.basicConfig(level=logging.INFO)
@@ -160,8 +159,6 @@ def main():
     train_dataset = load_grpo_data(args.data_path)
 
     # 5) GRPO config
-    # Note: TRL 0.15.2 GRPOConfig doesn't support all newest flags in __init__.
-    # We pass standard ones and set extras manually.
     grpo_args = GRPOConfig(
         output_dir=os.path.join(args.output_dir, run_name),
         per_device_train_batch_size=args.batch_size,
@@ -179,29 +176,25 @@ def main():
         remove_unused_columns=False,
         report_to="none",
         seed=args.seed,
-        # Standard GRPO in 0.15.2
         max_prompt_length=args.max_prompt_length,
         max_completion_length=args.max_completion_length,
         num_generations=args.num_generations,
+        num_iterations=args.num_iterations,
+        steps_per_generation=args.steps_per_generation,
         beta=args.beta,
+        epsilon=args.epsilon,
+        epsilon_high=args.epsilon,
         temperature=args.temperature,
+        top_p=args.top_p,
         use_vllm=args.use_vllm,
+        vllm_mode=args.vllm_mode,
+        vllm_ckpt=args.vllm_ckpt,
+        vllm_max_model_length=args.vllm_max_model_len,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        # We handle Liger Kernel manually in QwenMoleculeGRPOTrainer 
-        # to ensure it targets the inner model, not the wrapper.
+        vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
         use_liger_kernel=False,
+        use_liger_manual=args.use_liger,
     )
-    # Set extra attributes that our custom trainer uses but 0.15.2 config might not have
-    setattr(grpo_args, "use_liger_manual", args.use_liger)
-    setattr(grpo_args, "num_iterations", args.num_iterations)
-    setattr(grpo_args, "steps_per_generation", args.steps_per_generation)
-    setattr(grpo_args, "vllm_mode", args.vllm_mode)
-    setattr(grpo_args, "vllm_tensor_parallel_size", args.vllm_tensor_parallel_size)
-    setattr(grpo_args, "vllm_ckpt", args.vllm_ckpt)
-    setattr(grpo_args, "vllm_max_model_len", args.vllm_max_model_len)
-    setattr(grpo_args, "epsilon_high", args.epsilon) # for 0.15.2 consistency
-    setattr(grpo_args, "epsilon", args.epsilon)
-    setattr(grpo_args, "top_p", args.top_p)
 
     trainer = QwenMoleculeGRPOTrainer(
         model=model,

@@ -58,7 +58,7 @@ from transformers.utils import is_datasets_available, is_peft_available
 
 from trl.models import unwrap_model_for_generation
 from trl.trainer.callbacks import SyncRefModelCallback
-from trl import GRPOConfig
+from .grpo_config import GRPOConfig
 
 
 def identity(x):
@@ -92,14 +92,6 @@ def entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
     return -torch.sum(probs * log_probs, dim=-1)
 
 
-def nanmax(x: torch.Tensor, dim: int | None = None, keepdim: bool = False):
-    return torch.fmax(x, dim=dim, keepdim=keepdim) if dim is not None else torch.nanmax(x)
-
-
-def nanmin(x: torch.Tensor, dim: int | None = None, keepdim: bool = False):
-    return torch.fmin(x, dim=dim, keepdim=keepdim) if dim is not None else torch.nanmin(x)
-
-
 def nanstd(x: torch.Tensor, dim: int | None = None, keepdim: bool = False):
     """Standard deviation ignoring NaNs."""
     mask = ~torch.isnan(x)
@@ -125,70 +117,68 @@ RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], List[float]]]
 class RepeatSampler(Sampler):
     """
     Sampler that repeats the dataset multiple times and optionally shuffles.
-    Required for GRPO generation buffering logic.
+    Improved version with clean batch-level sharding and repetition logic.
     """
 
     def __init__(
         self,
         data_source,
-        mini_repeat_count: int = 1,
+        mini_repeat_count: int,
+        batch_size: int = 1,
         repeat_count: int = 1,
-        batch_size: Optional[int] = None,
-        shuffle: bool = False,
+        shuffle: bool = True,
         seed: Optional[int] = None,
         rank: int = 0,
         world_size: int = 1,
     ):
         self.data_source = data_source
         self.mini_repeat_count = mini_repeat_count
-        self.repeat_count = repeat_count
         self.batch_size = batch_size
+        self.repeat_count = repeat_count
+        self.num_samples = len(data_source)
         self.shuffle = shuffle
         self.seed = seed
         self.rank = rank
         self.world_size = world_size
-        # Add attributes to mimic DistributedSampler for accelerate
+        # Add attributes for accelerate compatibility
         self.num_replicas = world_size
-        # rank is already set above
+
+        if shuffle:
+            self.generator = torch.Generator()
+            if seed is not None:
+                # Use a different seed per rank to avoid identical shuffles across GPUs
+                self.generator.manual_seed(seed + rank)
 
     def __iter__(self):
-        n = len(self.data_source)
-        indices = list(range(n))
-
         if self.shuffle:
-            g = torch.Generator()
-            if self.seed is not None:
-                g.manual_seed(self.seed)
-            indices = torch.as_tensor(indices)[torch.randperm(n, generator=g)].tolist()
+            indexes = torch.randperm(self.num_samples, generator=self.generator).tolist()
+        else:
+            indexes = list(range(self.num_samples))
 
-        # Shard the indices before repeating them
-        # Each GPU processes a distinct subset of unique prompts
-        indices = indices[self.rank : n : self.world_size]
+        # Group into batches of 'batch_size' unique indices
+        chunks = [indexes[i : i + self.batch_size] for i in range(0, self.num_samples, self.batch_size)]
+        
+        # Drop partial batches to ensure all chunks have the same size and are easily sharded
+        chunks = [c for c in chunks if len(c) == self.batch_size]
+        
+        # Shard the chunks across GPUs (each GPU gets a subset of full batches)
+        chunks = chunks[self.rank : len(chunks) : self.world_size]
 
-        # Group by generation unit to ensure synchronous repeats
-        # We repeat at the batch level so the DataLoader and Trainer stay in sync
-        final_indices = []
-        batch_size = max(1, self.batch_size) # unique prompts per generation unit
-        for i in range(0, len(indices), batch_size):
-            batch = indices[i : i + batch_size]
-            
-            # Expand each unique prompt by mini_repeat_count (num_generations)
-            expanded = []
-            for idx in batch:
-                expanded.extend([idx] * self.mini_repeat_count)
-            
-            # Repeat this entire generation group for multiple iterations/steps
+        for chunk in chunks:
+            # Each batch is repeated for iterations/buffering (repeat_count)
+            # and each prompt is expanded for multiple generations (mini_repeat_count)
             for _ in range(self.repeat_count):
-                final_indices.extend(expanded)
-                
-        return iter(final_indices)
+                for index in chunk:
+                    for _ in range(self.mini_repeat_count):
+                        yield index
 
-    def __len__(self):
-        # Adjusted length for sharding
-        n = len(self.data_source)
-        # Number of unique prompts this rank handles
-        num_unique = (n - self.rank + self.world_size - 1) // self.world_size
-        return num_unique * self.mini_repeat_count * self.repeat_count
+    def __len__(self) -> int:
+        # Total full batches in the dataset
+        total_batches = self.num_samples // self.batch_size
+        # Batches assigned to this rank (standard sharding math)
+        num_rank_batches = (total_batches - self.rank + self.world_size - 1) // self.world_size
+        # Total samples yielded per epoch
+        return num_rank_batches * self.batch_size * self.mini_repeat_count * self.repeat_count
 
 
 # vLLM is optional.
@@ -390,7 +380,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
         self.vllm_server_base_url = getattr(args, "vllm_server_base_url", None)
         self.vllm_server_timeout = float(getattr(args, "vllm_server_timeout", 60.0))
         self.vllm_ckpt = getattr(args, "vllm_ckpt", None)
-        self.vllm_max_model_len = int(getattr(args, "vllm_max_model_len", 4096))
+        self.vllm_max_model_length = int(getattr(args, "vllm_max_model_length", 4096))
         self.scale_rewards = getattr(args, "scale_rewards", "none")
         self.importance_sampling_level = getattr(args, "importance_sampling_level", 0)
         self.mask_truncated_completions = getattr(args, "mask_truncated_completions", False)
@@ -564,7 +554,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
                     tensor_parallel_size=self.vllm_tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_gpu_memory_utilization,
                     max_num_seqs=vllm_max_num_seqs,
-                    max_model_len=self.vllm_max_model_len,
+                    max_model_len=self.vllm_max_model_length,
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index // self.vllm_tensor_parallel_size,
                     enable_prompt_embeds=True,
@@ -662,6 +652,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
 
         dataloader_params = {
             "batch_size": self._train_batch_size * self.num_generations * getattr(self.args, "steps_per_generation", 1),
+            # "batch_size": self._train_batch_size * self.args.steps_per_generation,
             "collate_fn": data_collator,
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
@@ -674,7 +665,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
             dataloader_params["worker_init_fn"] = partial(
                 seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index
             )
-            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+            if self.args.dataloader_num_workers > 0:
+                dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
 
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
@@ -850,11 +842,16 @@ class QwenMoleculeGRPOTrainer(Trainer):
         mode = "train" if self.model.training else "eval"
         if mode == "train":
             steps_per_gen = getattr(self.args, "steps_per_generation", 1)
+            # Generate every (steps_per_gen * num_iterations) steps
+            # - steps_per_gen: split large generation batch into smaller gradient steps
+            # - num_iterations: reuse same rollouts for multiple policy updates (PPO-style)
             generate_every = steps_per_gen * self.num_iterations
+            
             if self._step % generate_every == 0 or self._buffered_inputs is None:
+                # Generate and score completions for the incoming batch
                 generation_batch = self._generate_and_score_completions(generation_batch)
 
-                # Shuffle
+                # Shuffle for better gradient variance
                 batch_size = len(generation_batch["advantages"])
                 perm = list(range(batch_size))
                 random.shuffle(perm)
@@ -864,10 +861,11 @@ class QwenMoleculeGRPOTrainer(Trainer):
                     elif isinstance(v, list):
                         generation_batch[k] = [v[i] for i in perm]
 
-                # Split for steps_per_generation
+                # Split the batch into steps_per_gen smaller chunks for gradient computation
+                # Each chunk will be used num_iterations times
                 generation_batches = _split_batch_dict(generation_batch, steps_per_gen)
 
-                # Detach tensors
+                # Detach tensors to save memory and prevent backprop through old computation graphs
                 self._buffered_inputs = []
                 for b in generation_batches:
                     detached = {}
@@ -875,6 +873,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
                         detached[k] = v.detach() if isinstance(v, torch.Tensor) else v
                     self._buffered_inputs.append(detached)
 
+            # Return the appropriate buffered chunk
+            # Cycles through chunks (steps_per_gen times) and repeats (num_iterations times)
             inputs = self._buffered_inputs[self._step % steps_per_gen]
             self._step += 1
         else:
