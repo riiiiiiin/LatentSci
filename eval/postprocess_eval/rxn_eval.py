@@ -108,8 +108,6 @@ def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str = 'logs'):
         try:
             if subtask == 'MechSel' or subtask == 'mechsel':
                 all_results[subtask] = evaluate_MechSel(model_name, gt_path)
-            elif subtask in ['major_product', 'byproduct']:
-                all_results[subtask] = evaluate_mol(model_name, subtask, gt_path, f"{logs_dir}/fs")
             else:
                 all_results[subtask] = evaluate_mol(model_name, subtask, gt_path)
         except Exception as e:

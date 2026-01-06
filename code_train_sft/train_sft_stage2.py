@@ -17,7 +17,7 @@ import plotext as plt
 from config import ModelConfig
 from typing import Dict, List, Any, Optional
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PeftConfig
-
+from tqdm import tqdm
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -575,12 +575,17 @@ def load_lora_model_for_inference(
     lora_weights_path="./qwen3_mol_sft_lora_results/lora_weights",
     projector_path="./qwen3_mol_sft_lora_results/projector.pt",
     merge_lora=True,
-    device="cuda" if torch.cuda.is_available() else "cpu",
+    device=None,
     mol_config=None  # 新增：分子配置
 ):
     """
     加载LoRA微调的模型进行推理 - 修复设备一致性
     """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif isinstance(device, str):
+        device = torch.device(device)
+    
     if base_model_path is None:
         base_model_path = ModelConfig.DEFAULT_QWEN_PATH
     
@@ -606,7 +611,7 @@ def load_lora_model_for_inference(
     
     # 4. 加载LoRA权重
     from peft import PeftModel
-    model.model = PeftModel.from_pretrained(model.model, lora_weights_path)
+    model.model = PeftModel.from_pretrained(model.model, lora_weights_path, device_map={"": str(device)})
     
     # 5. 合并LoRA权重（可选，用于更快推理）
     if merge_lora:
@@ -673,11 +678,13 @@ def run_inference_on_test_data(
     max_new_tokens=2048,
     temperature=0.7,
     top_p=0.9,
-    device="cuda" if torch.cuda.is_available() else "cpu",
     save_results_path=None,
     batch_size=1,
     max_samples=None,
-    tokenization_max_len=None
+    tokenization_max_len=None,
+    proc_index: int = 0,
+    num_procs: int = 1,
+    device = None
 ):
     """
     基于 load_data(..., eval_mode=True) 的推理流程。
@@ -696,6 +703,15 @@ def run_inference_on_test_data(
     if max_samples is not None and max_samples < len(dataset):
         dataset = dataset.select(range(max_samples))
 
+    # --------- 新增：按 proc_index / num_procs 分片 ------------
+    if num_procs > 1:
+        total = len(dataset)
+        # 采用 strided slicing: proc_index, proc_index + num_procs, ...
+        indices = list(range(proc_index, total, num_procs))
+        dataset = dataset.select(indices)
+        logger.info(f"Process {proc_index}/{num_procs} -> assigned {len(dataset)} samples (original total {total})")
+    # ---------------------------------------------------------
+    
     logger.info(f"Number of eval samples to run: {len(dataset)}")
 
     # 确保模型在正确设备上
@@ -705,14 +721,11 @@ def run_inference_on_test_data(
     results = []
 
     # 逐样本推理（保持原有逐个样本日志/错误捕获）
-    for idx in range(len(dataset)):
+    for idx in tqdm(range(len(dataset))):
         item = dataset[idx]  # 已包含: input_ids (list[int]), attention_mask (list[int]), labels (None), smiles (list[str])
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing sample {idx+1}/{len(dataset)}")
 
         try:
             smiles_list = item.get("smiles", []) or []
-            logger.info(f"Input SMILES: {smiles_list}")
             # 清理 SMILES（去掉点）
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
 
@@ -741,15 +754,11 @@ def run_inference_on_test_data(
 
             generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
 
-            logger.info(f"Generated response: {generated_text[:200]}...")
-
             result = {
-                "sample_id": idx,
+                "sample_id": idx * num_procs + proc_index,
                 "smiles": smiles_list,
-                "generated_response": generated_text.strip(),
+                "result": generated_text.strip(),
                 # eval 模式下 ground truth 已为 None（或原数据中存在时仍可访问）
-                "ground_truth_label": None,
-                "ground_truth_cot": None,
                 "task": item.get("task", None)
             }
             results.append(result)
@@ -759,12 +768,10 @@ def run_inference_on_test_data(
             import traceback
             logger.error(traceback.format_exc())
             results.append({
-                "sample_id": idx,
+                "sample_id": idx * num_procs + proc_index,
                 "smiles": item.get("smiles", []),
-                "generated_response": None,
+                "result": None,
                 "error": str(e),
-                "ground_truth_label": None,
-                "ground_truth_cot": None,
                 "task": item.get("task", None)
             })
 
@@ -838,6 +845,13 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=0.9, help="top-p采样参数（用于inference模式）")
     parser.add_argument("--max_test_samples", type=int, default=None, help="最大测试样本数，None表示全部测试（用于inference模式）")
     parser.add_argument("--inference_results_path", type=str, default=None, help="推理结果保存路径（用于inference模式）")
+    
+    parser.add_argument("--proc_index", type=int, default=0,
+                    help="当前进程索引 (0-based)，用于样本分片")
+    parser.add_argument("--num_procs", type=int, default=1,
+                        help="并行进程总数（样本分片数）")
+    parser.add_argument("--gpu", type=int, default=None,
+                        help="显卡 id，优先于 proc_index (如果提供则使用此 GPU)")
 
     args = parser.parse_args()
 
@@ -889,13 +903,30 @@ if __name__ == "__main__":
             timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
             results_path = os.path.join(args.output_dir, f"inference_results_{timestamp}.json")
 
+        # 决定用于本进程的 device
+        if torch.cuda.is_available():
+            device = torch.device("cuda")   # 等价于 cuda:0（当前进程可见的第 0 张）
+            torch.cuda.set_device(0)
+        else:
+            device = torch.device("cpu")
+
+        # 设置当前 cuda device（当使用 cuda 时）
+        if device.type == "cuda":
+            try:
+                torch.cuda.set_device(device.index)
+            except Exception:
+                # 某些环境下 device.index 可能为 None，忽略
+                pass
+
         model, tokenizer = load_lora_model_for_inference(
             base_model_path=None,
             lora_weights_path=lora_path,
             projector_path=projector_path,
-            mol_config=mol_config
+            mol_config=mol_config,
+            device=device,           # 重要：显式传 device
+            merge_lora=True
         )
-
+        
         # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
         run_inference_on_test_data(
             model=model,
@@ -906,7 +937,10 @@ if __name__ == "__main__":
             top_p=args.top_p,
             save_results_path=results_path,
             max_samples=args.max_test_samples,
-            tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN)
+            tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN),
+            proc_index=args.proc_index,
+            num_procs=args.num_procs,
+        device=device
         )
 
         logger.info("Inference completed!")

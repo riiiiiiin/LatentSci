@@ -1,10 +1,5 @@
 set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <exp_name> <stage1_exp_name> <dataset_name> [cuda_visible_devices]"
-  exit 2
-fi
-
 # exp
 EXP_NAME=<exp_name>
 STAGE1_EXP_NAME=<stage_1_exp_name>
@@ -73,49 +68,58 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 LOG_FILE="${OUTPUT_DIR}/stage2_inference_and_eval_${TIMESTAMP}.log"
 
-# 导出 GPU 可见设备（若指定）
-if [[ -n "${CUDA_DEVICES}" ]]; then
-  export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
-  echo "Exported CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-fi
+# ---- 启动多进程推理（每张 GPU 一个进程） ----
+echo "$(date +'%Y-%m-%d %H:%M:%S') - Launching inference per-GPU..." | tee -a "${LOG_FILE}"
 
-# ---- 1) 运行推理（inference） ----
-echo "$(date +'%Y-%m-%d %H:%M:%S') - Launching inference..." | tee -a "${LOG_FILE}"
+# 解析 CUDA_DEVICES 列表为数组
+IFS=',' read -ra GPU_ARRAY <<< "${CUDA_DEVICES}"
+NUM_PROCS=${#GPU_ARRAY[@]}
 
-INFER_CMD=(
-  "${PYTHON_BIN}" "${SCRIPT_PATH}"
-  --mode inference
-  --output_dir "${OUTPUT_DIR}"
-  --data_path "${DATA_PATH}"
-  --lora_path "${LORA_PATH}"
-  --projector_path "${PROJECTOR_PATH}"
-  --inference_results_path "${INFERENCE_RESULTS_PATH}"
-  --batch_size "${BATCH_SIZE}"
-  --max_new_tokens "${MAX_NEW_TOKENS}"
-  --temperature "${TEMPERATURE}"
-  --top_p "${TOP_P}"
-  --wandb_project "biolatentcot-stage2"   # 可按需修改或移除
-  --wandb_run_name "${LOG_NAME}"
-  --wandb_entity ""                           # 如无可留空
-)
+PIDS=()
+for idx in "${!GPU_ARRAY[@]}"; do
+  GPU_ID="${GPU_ARRAY[idx]}"
+  PROC_INDEX="${idx}"
 
-echo "Running inference command:" | tee -a "${LOG_FILE}"
-printf " %s " "${INFER_CMD[@]}" | tee -a "${LOG_FILE}"
-echo "" | tee -a "${LOG_FILE}"
+  # per-process result & log file，避免覆盖
+  RESULTS_PATH_PROC="${OUTPUT_DIR}/inference_results_${TIMESTAMP}.proc${PROC_INDEX}.json"
+  LOG_FILE_PROC="${OUTPUT_DIR}/stage2_inference_and_eval_${TIMESTAMP}.proc${PROC_INDEX}.log"
 
-# 执行并将日志写入
-if "${INFER_CMD[@]}" 2>&1 | tee -a "${LOG_FILE}"; then
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - Inference finished successfully." | tee -a "${LOG_FILE}"
-else
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: Inference failed. See log: ${LOG_FILE}" | tee -a "${LOG_FILE}"
-  exit 10
-fi
+  # 构造命令（在环境变量前缀里设置 CUDA_VISIBLE_DEVICES 以便只看到该卡）
+  CMD=( "${PYTHON_BIN}" "${SCRIPT_PATH}"
+        --mode inference
+        --output_dir "${OUTPUT_DIR}"
+        --data_path "${DATA_PATH}"
+        --lora_path "${LORA_PATH}"
+        --projector_path "${PROJECTOR_PATH}"
+        --inference_results_path "${RESULTS_PATH_PROC}"
+        --batch_size "${BATCH_SIZE}"
+        --max_new_tokens "${MAX_NEW_TOKENS}"
+        --temperature "${TEMPERATURE}"
+        --top_p "${TOP_P}"
+        --wandb_project "biolatentcot-stage2"
+        --wandb_run_name "${LOG_NAME}.proc${PROC_INDEX}"
+        --wandb_entity ""
+        --proc_index "${PROC_INDEX}"
+        --num_procs "${NUM_PROCS}"
+        --gpu "${GPU_ID}"
+  )
 
-# 确认推理结果文件存在
-if [[ ! -f "${INFERENCE_RESULTS_PATH}" ]]; then
-  echo "ERROR: 推理结果文件不存在: ${INFERENCE_RESULTS_PATH}" | tee -a "${LOG_FILE}"
-  exit 11
-fi
+  # 打印并后台启动（日志重定向到 per-process log）
+  echo "Launching proc ${PROC_INDEX} on GPU ${GPU_ID}: ${CMD_ENV[*]} ${CMD[*]}" | tee -a "${LOG_FILE}"
+  ( env CUDA_VISIBLE_DEVICES="${GPU_ID}" HF_DATASETS_CACHE="${OUTPUT_DIR}/hf_cache_proc${PROC_INDEX}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
+
+  PIDS+=($!)
+done
+
+# 等待所有后台进程完成
+for p in "${PIDS[@]}"; do
+  wait "${p}" || {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: One of inference processes failed (pid=${p})." | tee -a "${LOG_FILE}"
+    exit 10
+  }
+done
+
+echo "$(date +'%Y-%m-%d %H:%M:%S') - All inference processes finished successfully." | tee -a "${LOG_FILE}"
 
 # ---- 2) 进入 eval 目录并运行 eval_results.py ----
 if [[ ! -d "eval" ]]; then

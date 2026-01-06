@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 from typing import Any, Dict, List
 import logging
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -12,13 +13,47 @@ def build_grouped_save_data(
     log_name: str
 ) -> Dict[str, Any]:
 
-    with open(raw_results_path, 'r') as f:
-        results = json.load(f)['test_results']
+    base, ext = os.path.splitext(raw_results_path)
+    ext = ext or ".json"
+    dir_path = os.path.dirname(raw_results_path) or "."
+    base_name = os.path.basename(base)
+
+    # shard pattern: xxx.proc*.json
+    shard_pattern = os.path.join(
+        dir_path,
+        f"{base_name}.proc*{ext}"
+    )
+
+    shard_files = sorted(glob.glob(shard_pattern))
+
+    if shard_files:
+        files_to_read = shard_files
+    else:
+        files_to_read = [raw_results_path]
+
+    merged_results = []
+
+    for path in files_to_read:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "test_results" not in data:
+            raise KeyError(f"'test_results' not found in {path}")
+
+        if not isinstance(data["test_results"], list):
+            raise TypeError(f"'test_results' is not a list in {path}")
+
+        merged_results.extend(data["test_results"])
+
+    results = merged_results
     
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in results:
         task_key = r.get("task", "__unknown__")
         grouped[task_key].append(r)
+        
+    for task_key, items in grouped.items():
+        items.sort(key=lambda x: x.get("sample_id", 0))
 
     for task, group in grouped.items():
         task_dir = os.path.join(save_results_dir, task)
