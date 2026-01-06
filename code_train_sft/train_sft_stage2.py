@@ -755,7 +755,7 @@ def run_inference_on_test_data(
             generated_text = tokenizer.decode(gen0, skip_special_tokens=True)
 
             result = {
-                "sample_id": idx,
+                "sample_id": idx * num_procs + proc_index,
                 "smiles": smiles_list,
                 "result": generated_text.strip(),
                 # eval 模式下 ground truth 已为 None（或原数据中存在时仍可访问）
@@ -768,7 +768,7 @@ def run_inference_on_test_data(
             import traceback
             logger.error(traceback.format_exc())
             results.append({
-                "sample_id": idx,
+                "sample_id": idx * num_procs + proc_index,
                 "smiles": item.get("smiles", []),
                 "result": None,
                 "error": str(e),
@@ -926,9 +926,6 @@ if __name__ == "__main__":
             device=device,           # 重要：显式传 device
             merge_lora=True
         )
-
-        base, ext = os.path.splitext(results_path)
-        results_path = f"{base}.proc{args.proc_index}{ext or '.json'}"
         
         # 在测试数据上运行推理（使用基于 load_data(..., eval_mode=True) 的流程）
         run_inference_on_test_data(
