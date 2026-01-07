@@ -1,10 +1,10 @@
 import sys, re, os, json
 from ChemCoTBench.rxn.rxnutils import read_json, is_valid_smiles
-from ChemCoTBench.core.utils import extract_answer
+from core.utils import extract_answer
 import logging
 import os
 
-from .core.evaluator import MoleculeSMILESEvaluator
+from core.evaluator import MoleculeSMILESEvaluator
 evaluator = MoleculeSMILESEvaluator()
 logger = logging.getLogger(__name__)
 

@@ -10,7 +10,7 @@ from rdkit.Chem import Draw
 from rdkit.Chem.Fingerprints import FingerprintMols
 import logging
 
-from ChemCoTBench.core.utils import extract_answer
+from core.utils import extract_answer
 
 logger = logging.getLogger(__name__)
 

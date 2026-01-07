@@ -3,7 +3,7 @@ import os
 import logging
 from tqdm import tqdm
 from ChemCoTBench.core.eval_metric import mol_opt_evaluater
-from ChemCoTBench.core.utils import extract_answer
+from core.utils import extract_answer
 
 def eval_molopt_from_list(optimized_prop, gt_list, pred_list, total_number):
     # this_function input: 

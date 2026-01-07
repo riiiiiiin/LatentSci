@@ -3,7 +3,7 @@ import json
 import os
 import logging
 from ChemCoTBench.core.eval_metric import mol_opt_evaluater
-from ChemCoTBench.core.utils import extract_answer
+from core.utils import extract_answer
 
 def eval_molund_from_list(gt_list, pred_list, total_number, task):
     # this_function input: 
