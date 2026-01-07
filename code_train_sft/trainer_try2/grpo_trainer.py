@@ -12,6 +12,9 @@ We keep TRL's implementation intact by:
 
 from __future__ import annotations
 
+import os
+import time
+from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
 import torch
@@ -60,6 +63,14 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         tools=None,
         rollout_func=None,
     ):
+        # We implement our own vLLM prompt_embeds path for this multimodal model.
+        # TRL's stock vLLM integration generates from token ids and cannot consume `prompt_embeds` built from SMILES.
+        self._use_vllm_for_generation = bool(getattr(args, "use_vllm", False)) if args is not None else False
+        _orig_use_vllm = None
+        if args is not None and self._use_vllm_for_generation:
+            _orig_use_vllm = args.use_vllm
+            args.use_vllm = False
+
         inner = getattr(model, "model", None)
         if inner is not None and hasattr(inner, "disable_adapter") and not hasattr(model, "disable_adapter"):
             # Make TRL's `with unwrap_model(model).disable_adapter():` work for a wrapper model.
@@ -103,15 +114,159 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 rollout_func=rollout_func,
             )
 
-        if getattr(self, "use_vllm", False):
-            raise NotImplementedError(
-                "This molecule-conditioned GRPO trainer does not support vLLM yet because generation needs "
-                "`prompt_embeds` built from `smiles`. Please run with `use_vllm=False`."
-            )
         if getattr(self, "tools", None):
             raise NotImplementedError("Tools/tool-calling is not supported in this molecule GRPO trainer.")
 
         self._current_smiles: list[list[str]] | None = None
+        self.llm = None
+        self.tp_group = None
+        self._last_loaded_step = -1
+
+        if self._use_vllm_for_generation:
+            self._init_vllm_engine(model=model, args=args)
+            if args is not None and _orig_use_vllm is not None:
+                args.use_vllm = _orig_use_vllm
+
+    def _init_vllm_engine(self, model, args) -> None:
+        if args is None:
+            raise ValueError("use_vllm=True requires a GRPOConfig/TrainingArguments instance.")
+
+        vllm_mode = getattr(args, "vllm_mode", "colocate")
+        if vllm_mode != "colocate":
+            raise NotImplementedError(
+                "This smiles-based vLLM integration only supports `vllm_mode='colocate'` because it relies on "
+                "prompt_embeds."
+            )
+
+        try:
+            from vllm import LLM  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise ImportError("use_vllm=True requires vLLM to be installed.") from e
+
+        # Determine the HF checkpoint directory for vLLM.
+        vllm_ckpt = getattr(args, "vllm_ckpt", None) or None
+        if isinstance(vllm_ckpt, str) and vllm_ckpt.strip() == "":
+            vllm_ckpt = None
+        if vllm_ckpt is None:
+            vllm_ckpt = getattr(getattr(model, "config", None), "_name_or_path", None) or getattr(
+                getattr(getattr(model, "model", None), "config", None), "_name_or_path", None
+            )
+        if not vllm_ckpt:
+            raise ValueError(
+                "Could not infer a vLLM checkpoint path. Please pass `--vllm_ckpt /path/to/qwen` "
+                "(a directory with config.json)."
+            )
+
+        self.vllm_mode = vllm_mode
+        self.vllm_tensor_parallel_size = int(getattr(args, "vllm_tensor_parallel_size", 1) or 1)
+        self.vllm_gpu_memory_utilization = float(getattr(args, "vllm_gpu_memory_utilization", 0.9))
+        self.vllm_enable_sleep_mode = bool(getattr(args, "vllm_enable_sleep_mode", False))
+        self.vllm_max_model_length = int(getattr(args, "vllm_max_model_length", 4096) or 4096)
+
+        if self.vllm_tensor_parallel_size > 1:
+            if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+                raise RuntimeError("vllm_tensor_parallel_size > 1 requires torch.distributed to be initialized.")
+            if not self.accelerator.num_processes % self.vllm_tensor_parallel_size == 0:
+                raise ValueError(
+                    f"vllm_tensor_parallel_size ({self.vllm_tensor_parallel_size}) must divide world size "
+                    f"({self.accelerator.num_processes}) evenly."
+                )
+            self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                [
+                    list(range(i * self.vllm_tensor_parallel_size, (i + 1) * self.vllm_tensor_parallel_size))
+                    for i in range(self.accelerator.num_processes // self.vllm_tensor_parallel_size)
+                ]
+            )
+
+        # vLLM relies on these env vars for distributed execution.
+        os.environ["RANK"] = str(self.accelerator.process_index)
+        os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
+        os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
+
+        # Capacity: number of sequences vLLM can keep in-flight.
+        steps_per_generation = int(getattr(args, "steps_per_generation", 1) or 1)
+        vllm_max_num_seqs = int(self.num_generations * args.per_device_train_batch_size * self.vllm_tensor_parallel_size * steps_per_generation)
+
+        self.llm = LLM(
+            model=vllm_ckpt,
+            tensor_parallel_size=self.vllm_tensor_parallel_size,
+            gpu_memory_utilization=self.vllm_gpu_memory_utilization,
+            max_num_seqs=vllm_max_num_seqs,
+            max_model_len=self.vllm_max_model_length,
+            distributed_executor_backend="external_launcher",
+            seed=self.accelerator.process_index // self.vllm_tensor_parallel_size,
+            enable_prompt_embeds=True,
+        )
+        if self.vllm_enable_sleep_mode:
+            self.llm.sleep(level=1)
+
+        self.accelerator.wait_for_everyone()
+
+    def _get_vllm_driver_model(self):
+        if self.llm is None:
+            raise RuntimeError("vLLM engine is not initialized.")
+        # vLLM internal API differs across versions; try a few known paths.
+        for path in (("llm_engine", "model_executor", "driver_worker", "model_runner", "model"),):
+            obj = self.llm
+            ok = True
+            for attr in path:
+                if not hasattr(obj, attr):
+                    ok = False
+                    break
+                obj = getattr(obj, attr)
+            if ok:
+                return obj
+        raise RuntimeError("Unable to locate vLLM model object for weight loading (unsupported vLLM version).")
+
+    def _move_model_to_vllm(self) -> None:
+        if not self._use_vllm_for_generation:
+            return
+
+        # Only sync the underlying text LLM (LoRA) to vLLM; molecule fusion happens on the HF side via prompt_embeds.
+        wrapper = self.accelerator.unwrap_model(self.model)
+        llm_module = getattr(wrapper, "model", wrapper)
+
+        # DeepSpeed ZeRO-3 needs parameter gathering.
+        deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+        zero_stage_3 = deepspeed_plugin is not None and deepspeed_plugin.zero_stage == 3
+        if zero_stage_3:  # pragma: no cover
+            import deepspeed
+
+            gather_if_zero3 = deepspeed.zero.GatheredParameters
+        else:
+            gather_if_zero3 = nullcontext
+
+        try:
+            from accelerate.utils import is_peft_model  # type: ignore
+        except Exception:  # pragma: no cover
+            def is_peft_model(_m):  # type: ignore
+                return False
+
+        llm_model = self._get_vllm_driver_model()
+
+        if is_peft_model(llm_module):
+            with gather_if_zero3(list(llm_module.parameters())):
+                if hasattr(llm_module, "merge_adapter"):
+                    llm_module.merge_adapter()
+
+                for name, param in llm_module.named_parameters():
+                    name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                    if getattr(llm_module, "prefix", None) and llm_module.prefix in name:
+                        continue
+                    if "original_module" in name:
+                        continue
+                    name = name.replace("_checkpoint_wrapped_module.", "").replace("modules_to_save.default.", "")
+                    with gather_if_zero3([param]):
+                        llm_model.load_weights([(name, param.data)])
+
+                if hasattr(llm_module, "unmerge_adapter"):
+                    llm_module.unmerge_adapter()
+        else:
+            for name, param in llm_module.named_parameters():
+                name = name.replace("_checkpoint_wrapped_module.", "")
+                with gather_if_zero3([param]):
+                    llm_model.load_weights([(name, param.data)])
+
 
     def _extract_smiles_from_inputs(self, inputs: list[dict[str, Any]]) -> list[list[str]]:
         if not inputs:
@@ -132,9 +287,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         return output
 
     def _generate_single_turn(self, prompts: list):
-        if getattr(self, "use_vllm", False):
-            raise NotImplementedError("vLLM is not supported for smiles-based generation.")
-
         if prompts and not isinstance(prompts[0], str):
             raise NotImplementedError("Conversational prompts are not supported for the molecule GRPO trainer.")
 
@@ -149,6 +301,90 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 f"smiles={None if smiles is None else len(smiles)}, batch={prompt_ids.size(0)}."
             )
 
+        # vLLM path: build prompt_embeds (HF side), then generate token ids using vLLM.
+        if self._use_vllm_for_generation:
+            if self.llm is None:
+                raise RuntimeError("use_vllm=True but vLLM engine is not initialized.")
+
+            if self.state.global_step != self._last_loaded_step:
+                self._move_model_to_vllm()
+                self._last_loaded_step = self.state.global_step
+
+            wrapper = self.accelerator.unwrap_model(self.model)
+            if not hasattr(wrapper, "get_prompt_embeddings"):
+                raise AttributeError(
+                    "Model must implement `get_prompt_embeddings(smiles_list, input_ids, attention_mask, ...)` "
+                    "to support vLLM prompt_embeds generation."
+                )
+
+            all_prompt_ids = prompt_ids
+            all_prompt_mask = prompt_mask
+            all_smiles = smiles
+            orig_size = len(prompts)
+            if self.vllm_tensor_parallel_size > 1:
+                if self.tp_group is None:
+                    raise RuntimeError("TP group not initialized.")
+                gathered_prompt_ids = [torch.empty_like(prompt_ids) for _ in range(self.vllm_tensor_parallel_size)]
+                gathered_prompt_mask = [torch.empty_like(prompt_mask) for _ in range(self.vllm_tensor_parallel_size)]
+                torch.distributed.all_gather(gathered_prompt_ids, prompt_ids, group=self.tp_group)
+                torch.distributed.all_gather(gathered_prompt_mask, prompt_mask, group=self.tp_group)
+
+                gathered_smiles = [None for _ in range(self.vllm_tensor_parallel_size)]
+                torch.distributed.all_gather_object(gathered_smiles, smiles, group=self.tp_group)
+                all_smiles = [s for sub in gathered_smiles for s in sub]
+
+                all_prompt_ids = torch.cat(gathered_prompt_ids, dim=0)
+                all_prompt_mask = torch.cat(gathered_prompt_mask, dim=0)
+
+            if self.vllm_enable_sleep_mode:
+                torch.cuda.empty_cache()
+                self.llm.wake_up(level=1)
+
+            with torch.inference_mode():
+                prompt_embeds, prompt_attn = wrapper.get_prompt_embeddings(
+                    smiles_list=all_smiles,
+                    input_ids=all_prompt_ids,
+                    attention_mask=all_prompt_mask,
+                    refine_bio_tokens=True,
+                )
+            embed_list = [prompt_embeds[i][prompt_attn[i].bool()].contiguous() for i in range(prompt_embeds.size(0))]
+
+            from vllm import SamplingParams  # type: ignore
+
+            sampling_params = SamplingParams(
+                n=1,
+                repetition_penalty=self.repetition_penalty,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                min_p=0.0 if self.min_p is None else self.min_p,
+                max_tokens=self.max_completion_length,
+                logprobs=0,
+            )
+
+            start = time.time()
+            all_outputs = self.llm.generate(
+                [{"prompt_embeds": e} for e in embed_list],
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
+            if self.accelerator.is_main_process:
+                _ = time.time() - start
+
+            all_completion_ids = [output.token_ids for outputs in all_outputs for output in outputs.outputs]
+            if self.vllm_tensor_parallel_size > 1:
+                local_rank_in_group = torch.distributed.get_rank(group=self.tp_group)
+                tp_slice = slice(local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size)
+                completion_ids_list = all_completion_ids[tp_slice]
+            else:
+                completion_ids_list = all_completion_ids
+
+            prompt_ids_list = [p[m].tolist() for p, m in zip(prompt_ids, prompt_mask.bool())]
+            logprobs = None
+            extra_fields = {}
+            return prompt_ids_list, completion_ids_list, logprobs, extra_fields
+
+        # HF path: prompt_embeds + transformers generate
         with (
             unwrap_model_for_generation(
                 self.model_wrapped,

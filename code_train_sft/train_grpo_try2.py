@@ -132,7 +132,12 @@ def main():
     parser.add_argument("--vllm_mode", type=str, default="colocate", choices=["colocate", "server"])
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
-    parser.add_argument("--vllm_ckpt", type=str, default=None, help="Optional vLLM model path/name (defaults to model path).")
+    parser.add_argument(
+        "--vllm_ckpt",
+        type=str,
+        default=ModelConfig.DEFAULT_QWEN_PATH,
+        help="vLLM base model checkpoint path/name (defaults to ModelConfig.DEFAULT_QWEN_PATH).",
+    )
     parser.add_argument("--vllm_max_model_len", type=int, default=4096, help="Maximum model length for vLLM engine.")
 
     args = parser.parse_args()
@@ -220,4 +225,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
