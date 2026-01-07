@@ -18,6 +18,7 @@ from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
 import torch
+from transformers import Trainer as _HFTrainer
 
 from trl.models import unwrap_model_for_generation
 from trl.trainer.grpo_trainer import GRPOTrainer as _TRL_GRPOTrainer
@@ -291,7 +292,9 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             raise NotImplementedError("Conversational prompts are not supported for the molecule GRPO trainer.")
 
         generate_inputs = self.processing_class(text=prompts, padding=True, padding_side="left", return_tensors="pt")
-        generate_inputs = super()._prepare_inputs(generate_inputs)
+        # Important: GRPOTrainer overrides `_prepare_inputs` with buffering logic; for generation-time tokenization we
+        # only need the vanilla HF `Trainer._prepare_inputs` (device placement, etc.).
+        generate_inputs = _HFTrainer._prepare_inputs(self, generate_inputs)
         prompt_ids, prompt_mask = generate_inputs["input_ids"], generate_inputs["attention_mask"]
 
         smiles = self._current_smiles
