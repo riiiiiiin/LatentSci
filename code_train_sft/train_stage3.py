@@ -207,9 +207,20 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         device = next(model.parameters()).device
         checkpoint = torch.load(mm_projector_path, map_location=device)
         
-        # 直接按组合格式加载
-        model.projector.load_state_dict(checkpoint['projector'])
-        logger.info("Successfully loaded both projector and bio_updater.")
+        # 直接按组合格式加载（兼容旧 checkpoint 缺 key）
+        if "projector" in checkpoint:
+            model.projector.load_state_dict(checkpoint["projector"])
+            logger.info("Loaded projector weights.")
+        else:
+            logger.warning("Checkpoint missing 'projector' key, skipped.")
+
+        if "bio_updater" in checkpoint and hasattr(model, "bio_updater"):
+            model.bio_updater.load_state_dict(checkpoint["bio_updater"])
+            logger.info("Loaded bio_updater weights.")
+
+        if "bio_thinker" in checkpoint and hasattr(model, "bio_thinker"):
+            model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
+            logger.info("Loaded bio_thinker weights.")
             
     return model
 
@@ -232,6 +243,19 @@ def train_stage3():
     parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
     parser.add_argument("--training_stage", type=int, default=3, choices=[1, 2, 3], help="Which stage to train: 1 (No COT), 2 (With COT), 3 (Latent/Coconut)")
+    # Stage 3 switches (only effective when --training_stage 3)
+    parser.add_argument(
+        "--is_coconut",
+        type=lambda x: (str(x).lower() == "true"),
+        default=True,
+        help="Whether to run Coconut latent training for stage 3 (ignored for stage 1/2).",
+    )
+    parser.add_argument(
+        "--is_both_latent",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
+    )
     # Counterfactual bio-token embedding perturbation + loss
     parser.add_argument("--cf_lambda", type=float, default=0.0, help="Weight for counterfactual hinge loss (0 disables).")
     parser.add_argument("--cf_margin", type=float, default=0.5, help="Margin for hinge on (L_cf - L_pos).")
@@ -255,28 +279,41 @@ def train_stage3():
     if args.training_stage == 1:
         stages = [0]
         is_coconut = False
+        is_both_latent = False
         include_cot = False
         mode_name = "Stage1-NoCOT"
     elif args.training_stage == 2:
         stages = [0]
         is_coconut = False
+        is_both_latent = False
         include_cot = True
         mode_name = "Stage2-WithCOT"
     else: # Stage 3
-        stages = range(args.max_latent_stage + 1)
-        is_coconut = True
+        is_coconut = bool(args.is_coconut)
+        is_both_latent = bool(args.is_both_latent)
         include_cot = True
-        mode_name = "Stage3-Coconut"
+        if is_coconut:
+            stages = range(args.max_latent_stage + 1)
+            mode_name = "Stage3-Coconut"
+        else:
+            stages = [0]
+            mode_name = "Stage3-WithCOT"
 
     for stage in stages:
         logger.info(f"\n" + "🚀" * 30)
         logger.info(f"STARTING {mode_name} (STAGE {stage})")
         if is_coconut:
             logger.info(f"Replace first {stage} steps with {stage * args.c_thought} latents")
+        if is_both_latent:
+            logger.info("Bio-latent thinker enabled (N_bio_latents = #smiles).")
         logger.info("🚀" * 30 + "\n")
 
         # 2.1 每一个 Stage 彻底重新初始化模型
-        model = Qwen3MoleculeLLM(qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH, mol_config=mol_config)
+        model = Qwen3MoleculeLLM(
+            qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
+            mol_config=mol_config,
+            is_both_latent=is_both_latent,
+        )
         tokenizer = model.tokenizer
         
         # 加载上一个 Stage 的权重
@@ -311,6 +348,10 @@ def train_stage3():
         
         for param in model.bio_updater.parameters():
             param.requires_grad = True
+
+        if hasattr(model, "bio_thinker"):
+            for param in model.bio_thinker.parameters():
+                param.requires_grad = bool(is_both_latent)
         
         model.model.train()
 
@@ -400,10 +441,11 @@ def train_stage3():
         os.makedirs(current_lora_path, exist_ok=True)
         model.model.save_pretrained(current_lora_path)
         
-        # 将 Projector 和 Bio Updater 存入同一个文件
+        # 将 Projector / Bio Updater / Bio Thinker 存入同一个文件
         mm_weights = {
             'projector': model.projector.state_dict(),
-            'bio_updater': model.bio_updater.state_dict()
+            'bio_updater': model.bio_updater.state_dict(),
+            'bio_thinker': model.bio_thinker.state_dict(),
         }
         torch.save(mm_weights, current_projector_path)
         
@@ -420,4 +462,3 @@ def train_stage3():
 
 if __name__ == "__main__":
     train_stage3()
-

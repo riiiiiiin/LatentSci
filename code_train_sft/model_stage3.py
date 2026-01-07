@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import sys
@@ -125,6 +126,45 @@ class BioTokenUpdater(nn.Module):
 
 
 # ============================
+# 1c. Bio Thinker: one-pass self-attn block for bio-latent tokens
+# ============================
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, base: float = 10000.0):
+        super().__init__()
+        self.d_model = int(d_model)
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.d_model, 2).float() / self.d_model))
+        self.register_buffer("_inv_freq", inv_freq, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        L = x.size(1)
+        position = torch.arange(L, device=x.device, dtype=self._inv_freq.dtype)
+        sinusoid_inp = torch.einsum("i,j->ij", position, self._inv_freq.to(device=x.device))
+        pe = torch.zeros(L, self.d_model, device=x.device, dtype=x.dtype)
+        pe[:, 0::2] = torch.sin(sinusoid_inp).to(dtype=x.dtype)
+        pe[:, 1::2] = torch.cos(sinusoid_inp).to(dtype=x.dtype)
+        return pe.unsqueeze(0)
+
+
+class BioThinker(nn.Module):
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1, dim_feedforward: Optional[int] = None):
+        super().__init__()
+        self.pos = SinusoidalPositionalEncoding(d_model=d_model)
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=(dim_feedforward if dim_feedforward is not None else d_model * 4),
+            dropout=dropout,
+            activation=F.gelu,
+            batch_first=True,
+        )
+
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = x + self.pos(x)
+        key_padding_mask = (attention_mask == 0) if attention_mask is not None else None
+        return self.layer(x, src_key_padding_mask=key_padding_mask)
+
+
+# ============================
 # 2. 多模态融合模型 (兼容trl的SFTTrainer)
 # ============================
 class Qwen3MoleculeLLM(PreTrainedModel):
@@ -132,6 +172,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                  qwen_model_name,
                  mol_config,       # 🚨 必须传入配置字典
                  device_map=None,
+                 is_both_latent: bool = False,
                  torch_dtype=torch.bfloat16):
         """
         分子-文本多模态大语言模型
@@ -151,13 +192,23 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.mol_num_heads = mol_config.get('num_heads', 8)
         self.smi_ted_folder = mol_config.get('smi_ted_folder', ModelConfig.DEFAULT_SMI_TED_FOLDER)
         self.smi_ted_ckpt = mol_config.get('smi_ted_ckpt', ModelConfig.DEFAULT_SMI_TED_CKPT)
+        self.is_both_latent = bool(is_both_latent)
 
         # ---- 1. 加载预训练的Qwen LLM ----
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
         self.config._name_or_path = qwen_model_name
 
         # 添加分子特殊标记
-        self.extra_tokens = ["<mol_start>", "<mol_end>", "<latent>", "<start_latent>", "<end_latent>"]
+        self.extra_tokens = [
+            "<mol_start>",
+            "<mol_end>",
+            "<latent>",
+            "<start_latent>",
+            "<end_latent>",
+            "<bio_latent>",
+            "<start_bio_latent>",
+            "<end_bio_latent>",
+        ]
         self.tokenizer.add_tokens(self.extra_tokens)
 
         # 加载基础语言模型
@@ -181,6 +232,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.latent_id = self.tokenizer.convert_tokens_to_ids("<latent>")
         self.start_latent_id = self.tokenizer.convert_tokens_to_ids("<start_latent>")
         self.end_latent_id = self.tokenizer.convert_tokens_to_ids("<end_latent>")
+        self.bio_latent_id = self.tokenizer.convert_tokens_to_ids("<bio_latent>")
+        self.start_bio_latent_id = self.tokenizer.convert_tokens_to_ids("<start_bio_latent>")
+        self.end_bio_latent_id = self.tokenizer.convert_tokens_to_ids("<end_bio_latent>")
 
         # 获取LLM的嵌入维度
         self.d_llm = self.model.get_input_embeddings().weight.shape[1]
@@ -210,6 +264,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # ---- Stage 3: Bio Token Updater ----
         self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
         self.bio_updater.to(self.model.dtype)
+
+        # ---- Stage 3: Bio Thinker (optional) ----
+        self.bio_thinker = BioThinker(d_model=self.d_llm, nhead=self.mol_num_heads)
+        self.bio_thinker.to(self.model.dtype)
 
     # ---- Liger Kernel & Compatibility Helpers ----
     def _get_actual_llm(self):
@@ -350,6 +408,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         smiles_list = kwargs.pop("smiles", None)
         do_perturb = kwargs.pop("do_perturb", False) # 是否执行逆向干扰 (Counterfactual perturbation)
+        use_bio_thinker = bool(kwargs.pop("is_both_latent", self.is_both_latent))
 
         if smiles_list is None:
             raise ValueError("必须提供smiles参数")
@@ -391,6 +450,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         with torch.no_grad():
             start_emb = embed(torch.tensor([[self.start_id]], device=device)) # [1, 1, d_llm]
             end_emb = embed(torch.tensor([[self.end_id]], device=device))   # [1, 1, d_llm]
+            start_bio_latent_emb = embed(torch.tensor([[self.start_bio_latent_id]], device=device))
+            bio_latent_emb = embed(torch.tensor([[self.bio_latent_id]], device=device))
+            end_bio_latent_emb = embed(torch.tensor([[self.end_bio_latent_id]], device=device))
 
         # =========================================================
         # 2. 结构还原与变长融合 (去文本 Padding)
@@ -404,6 +466,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         fused_samples_list = []
         fused_labels_list = []
         bio_positions_list = [] # Stage 3: 记录每个 sample 中 bio token 的索引
+        bio_latent_positions_list = []  # 记录每个 sample 的 bio latent token 索引（绝对位置）
         cursor = 0
 
         for b in range(B):
@@ -450,8 +513,26 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 t_emb = text_emb[b]
                 t_lab = labels[b] if labels is not None else None
 
+            # 2.2b 在拼好的后面插入 Bio Latent tokens（数量 = smiles 个数）
+            n_bio_latents = mol_counts[b]
+            bio_latent_block = None
+            bio_latent_block_len = 0
+            bio_latent_positions = []
+            if use_bio_thinker and n_bio_latents > 0:
+                bio_latent_block_len = n_bio_latents + 2  # start + N + end
+                bio_latents = bio_latent_emb.expand(1, n_bio_latents, -1)
+                bio_latent_block = torch.cat([start_bio_latent_emb, bio_latents, end_bio_latent_emb], dim=1)
+
+                base_len = mol_part.size(1) + t_emb.size(0)
+                bio_latent_positions = list(range(base_len + 1, base_len + 1 + n_bio_latents))
+
+            bio_latent_positions_list.append(bio_latent_positions)
+
             # 2.3 融合
-            sample_fused = torch.cat([mol_part, t_emb.unsqueeze(0)], dim=1)
+            parts = [mol_part, t_emb.unsqueeze(0)]
+            if bio_latent_block is not None:
+                parts.append(bio_latent_block)
+            sample_fused = torch.cat(parts, dim=1)
             
             # 2.4 处理 Labels
             if t_lab is not None:
@@ -463,7 +544,11 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
                 # 分子标记设为 -100 (不计算 Loss)
                 mol_lab = torch.full((1, mol_part.size(1)), -100, device=device, dtype=t_lab.dtype)
-                sample_lab = torch.cat([mol_lab, t_lab_masked.unsqueeze(0)], dim=1)
+                lab_parts = [mol_lab, t_lab_masked.unsqueeze(0)]
+                if bio_latent_block_len > 0:
+                    bio_lab = torch.full((1, bio_latent_block_len), -100, device=device, dtype=t_lab.dtype)
+                    lab_parts.append(bio_lab)
+                sample_lab = torch.cat(lab_parts, dim=1)
                 fused_labels_list.append(sample_lab)
             
             fused_samples_list.append(sample_fused)
@@ -482,6 +567,16 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             final_attn_mask[b, :curr_L] = 1
             if final_labels is not None:
                 final_labels[b, :curr_L] = fused_labels_list[b]
+
+        # =========================================================
+        # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
+        # =========================================================
+        if use_bio_thinker and any(bio_latent_positions_list):
+            thinker_out = self.bio_thinker(final_embeds, attention_mask=final_attn_mask)
+            for b in range(B):
+                positions = bio_latent_positions_list[b]
+                if positions:
+                    final_embeds[b, positions] = thinker_out[b, positions]
 
         # =========================================================
         # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
@@ -558,6 +653,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         device = input_ids.device
         B = input_ids.size(0)
+        use_bio_thinker = bool(self.is_both_latent)
 
         # =========================================================
         # 1. Molecule features: flatten + batch projection
@@ -590,6 +686,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         embed = self.model.get_input_embeddings()
         start_emb = embed(torch.tensor([[self.start_id]], device=device))
         end_emb = embed(torch.tensor([[self.end_id]], device=device))
+        start_bio_latent_emb = embed(torch.tensor([[self.start_bio_latent_id]], device=device))
+        bio_latent_emb = embed(torch.tensor([[self.bio_latent_id]], device=device))
+        end_bio_latent_emb = embed(torch.tensor([[self.end_bio_latent_id]], device=device))
 
         # =========================================================
         # 2. Reconstruct + fuse variable-length (strip text padding)
@@ -597,6 +696,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         text_emb = embed(input_ids).to(dtype=self.model.dtype)
         fused_samples_list = []
         bio_positions_list = []
+        bio_latent_positions_list = []
         cursor = 0
 
         for b in range(B):
@@ -627,7 +727,22 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             else:
                 t_emb = text_emb[b]
 
-            fused_samples_list.append(torch.cat([mol_part, t_emb.unsqueeze(0)], dim=1))
+            n_bio_latents = mol_counts[b]
+            bio_latent_block = None
+            bio_latent_positions = []
+            if use_bio_thinker and n_bio_latents > 0:
+                bio_latents = bio_latent_emb.expand(1, n_bio_latents, -1)
+                bio_latent_block = torch.cat([start_bio_latent_emb, bio_latents, end_bio_latent_emb], dim=1)
+
+                base_len = mol_part.size(1) + t_emb.size(0)
+                bio_latent_positions = list(range(base_len + 1, base_len + 1 + n_bio_latents))
+
+            bio_latent_positions_list.append(bio_latent_positions)
+
+            parts = [mol_part, t_emb.unsqueeze(0)]
+            if bio_latent_block is not None:
+                parts.append(bio_latent_block)
+            fused_samples_list.append(torch.cat(parts, dim=1))
 
         # =========================================================
         # 3. Left pad to batch max length (generation-style)
@@ -643,6 +758,17 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             diffs.append(diff)
             prompt_embeds[b, diff:] = fused_samples_list[b]
             prompt_attn_mask[b, diff:] = 1
+
+        # =========================================================
+        # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
+        # =========================================================
+        if use_bio_thinker and any(bio_latent_positions_list):
+            thinker_out = self.bio_thinker(prompt_embeds, attention_mask=prompt_attn_mask)
+            for b in range(B):
+                positions = bio_latent_positions_list[b]
+                if positions:
+                    shifted = [p + diffs[b] for p in positions]
+                    prompt_embeds[b, shifted] = thinker_out[b, shifted]
 
         # =========================================================
         # 4. Coconut latent-feedback refinement (optional based on presence of <latent>)
