@@ -383,7 +383,7 @@ def eval_moledit_from_list(src_list, pred_list, group_a, group_b, task, total_nu
     }
     return my_dict
     
-def evaluate_moledit_score(model_name, gt_path, logs_dir): 
+def evaluate_moledit_score(model_name, gt_path, logs_dir, results_dir): 
     result_dict = dict()
     
     for task in ['add', 'delete', 'sub']:
@@ -418,7 +418,7 @@ def evaluate_moledit_score(model_name, gt_path, logs_dir):
         result_dict[task] = eval_moledit_from_list(src_list=src_list, pred_list=pred_list, group_a=group_a, group_b=group_b, task=task, total_number=len(pred_results)) 
     
     logger.info(f"eval_score_{model_name}_moledit:\n\r{result_dict}")
-    os.makedirs("results/moledit", exist_ok=True)
-    json.dump(result_dict, open(f"results/moledit/eval_score_{model_name}.json", "w"), indent=4)
+    os.makedirs(f"{results_dir}/moledit", exist_ok=True)
+    json.dump(result_dict, open(f"{results_dir}/moledit/eval_score_{model_name}.json", "w"), indent=4)
     
     return result_dict

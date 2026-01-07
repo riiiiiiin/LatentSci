@@ -44,7 +44,7 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     
     return my_dict
     
-def evaluate_molund_score(model_name, gt_path, logs_dir):
+def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir):
     logger = logging.getLogger(__name__)
     task_dict = dict(
         fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',
@@ -78,7 +78,7 @@ def evaluate_molund_score(model_name, gt_path, logs_dir):
         logger.debug(model_name, task, result_dict[task])
     
     logger.info(f"eval_score_{model_name}_molund:\n\r{result_dict}")
-    os.makedirs("results/molund", exist_ok=True)
-    json.dump(result_dict, open(f"results/molund/eval_score_{model_name}.json", "w"), indent=4)
+    os.makedirs(f"{results_dir}/molund", exist_ok=True)
+    json.dump(result_dict, open(f"{results_dir}/molund/eval_score_{model_name}.json", "w"), indent=4)
     
     return result_dict        

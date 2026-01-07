@@ -86,7 +86,7 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir):
     accuracy = sum(1 for pred, gt in zip(preds, gts) if pred == gt) / len(gts)
     return {"MCQ Accuracy (mean)": accuracy}
 
-def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str):
+def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str, results_dir):
     all_results = {}
     subtasks = subtask_to_result_key.keys()
     for subtask in subtasks:
@@ -100,7 +100,7 @@ def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str):
             logger.error(f"Error evaluating {subtask} for {model_name}: {e}")
             all_results[subtask] = None
     logger.info(f"eval_score_{model_name}_rxn:\n\r{all_results}")
-    os.makedirs("results/rxn", exist_ok=True)
-    json.dump(all_results, open(f"results/rxn/eval_score_{model_name}.json", "w"), indent=4)
+    os.makedirs(f"{results_dir}/rxn", exist_ok=True)
+    json.dump(all_results, open(f"{results_dir}/rxn/eval_score_{model_name}.json", "w"), indent=4)
 
     return all_results

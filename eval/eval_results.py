@@ -21,6 +21,7 @@ dataset_path = args.dataset_path
 current_file = os.path.abspath(__file__)
 current_dir = os.path.dirname(current_file)
 logs_dir = os.path.join(current_dir, 'logs')
+results_dir = os.path.join(current_dir, 'results')
 
 os.makedirs(logs_dir, exist_ok=True)
 build_grouped_save_data(result_path, logs_dir, log_name)
@@ -31,17 +32,7 @@ if 'ChemCoTBench' in dataset_path:
     from ChemCoTBench.eval_molund import evaluate_molund_score
     from ChemCoTBench.eval_rxn import evaluate_rxn_score
     
-    moledit_results = evaluate_moledit_score(log_name, f'{dataset_path}/mol_edit', logs_dir)
-    molopt_results = evaluate_molopt_score(log_name, f'{dataset_path}/mol_opt', logs_dir)
-    molund_results = evaluate_molund_score(log_name, f'{dataset_path}/mol_und', logs_dir)
-    rxn_results = evaluate_rxn_score(log_name, f'{dataset_path}/rxn', logs_dir)
-
-    all_results = {
-        'moledit': moledit_results,
-        'molopt': molopt_results,
-        'molund': molund_results,
-        'rxn': rxn_results
-    }
-
-    os.makedirs('results/all_results', exist_ok=True)
-    json.dump(all_results, open(f'results/all_results/{log_name}.json', 'w'), indent=4)
+    moledit_results = evaluate_moledit_score(log_name, f'{dataset_path}/mol_edit', logs_dir, results_dir)
+    molopt_results = evaluate_molopt_score(log_name, f'{dataset_path}/mol_opt', logs_dir, results_dir)
+    molund_results = evaluate_molund_score(log_name, f'{dataset_path}/mol_und', logs_dir, results_dir)
+    rxn_results = evaluate_rxn_score(log_name, f'{dataset_path}/rxn', logs_dir, results_dir)

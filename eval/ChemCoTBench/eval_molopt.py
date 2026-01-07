@@ -24,7 +24,7 @@ def eval_molopt_from_list(optimized_prop, gt_list, pred_list, total_number):
     
     return result_dict
     
-def evaluate_molopt_score(model_name, gt_path, logs_dir):
+def evaluate_molopt_score(model_name, gt_path, logs_dir, results_dir):
     ## 在get_molopt_cot中得到test结果, 我们评测这些test结果
     prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
     # prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', gsk='gsk3b')
@@ -64,7 +64,7 @@ def evaluate_molopt_score(model_name, gt_path, logs_dir):
         result_final[prop] = result_dict
     
     logger.info(f"eval_score_{model_name}_molopt:\n\r{result_final}")
-    os.makedirs("results/molopt", exist_ok=True)
-    json.dump(result_final, open(f"results/molopt/eval_score_{model_name}.json", "w"), indent=4)
+    os.makedirs(f"{results_dir}/molopt", exist_ok=True)
+    json.dump(result_final, open(f"{results_dir}/molopt/eval_score_{model_name}.json", "w"), indent=4)
     
     return result_final
