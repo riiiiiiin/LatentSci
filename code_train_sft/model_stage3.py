@@ -235,12 +235,31 @@ class Qwen3MoleculeLLM(PreTrainedModel):
     def lm_head(self):
         return self._get_actual_llm().lm_head
 
-    def gradient_checkpointing_enable(self, **kwargs):
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, **kwargs):
         """
         开启梯度检查点，转发给内部的语言模型。
+
+        兼容 TRL/Transformers 的两种调用方式：
+        - `gradient_checkpointing_enable(gradient_checkpointing_kwargs=dict(...))`
+        - `gradient_checkpointing_enable(dict(...))`（将 dict 作为位置参数传入）
         """
-        if hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable(**kwargs)
+        if not hasattr(self.model, "gradient_checkpointing_enable"):
+            return
+
+        if isinstance(gradient_checkpointing_kwargs, dict):
+            merged = {**gradient_checkpointing_kwargs, **kwargs}
+        elif gradient_checkpointing_kwargs is None:
+            merged = dict(kwargs)
+        else:
+            # Unexpected positional argument type; ignore it.
+            merged = dict(kwargs)
+
+        try:
+            # transformers 常见签名：gradient_checkpointing_enable(gradient_checkpointing_kwargs=...)
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=merged)
+        except TypeError:
+            # 兼容少数实现：gradient_checkpointing_enable(**kwargs)
+            self.model.gradient_checkpointing_enable(**merged)
             
     def gradient_checkpointing_disable(self):
         """
