@@ -52,11 +52,12 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerBase,
     Trainer,
-    TrainerCallback,
 )
 from transformers.trainer_utils import seed_worker
 from transformers.utils import is_datasets_available, is_peft_available
 
+from trl.models import unwrap_model_for_generation
+from trl.trainer.callbacks import SyncRefModelCallback
 from .grpo_config import GRPOConfig
 
 
@@ -109,54 +110,14 @@ logger = logging.get_logger(__name__)
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
-
-class SyncRefModelCallback(TrainerCallback):
-    """
-    Minimal replacement for `trl.trainer.callbacks.SyncRefModelCallback`.
-
-    Syncs `ref_model` towards the current policy model every `ref_model_sync_steps` steps:
-      `ref <- alpha * policy + (1 - alpha) * ref`
-    """
-
-    def __init__(self, ref_model: nn.Module, accelerator, alpha: float = 0.6, sync_steps: int = 512):
-        self.ref_model = ref_model
-        self.accelerator = accelerator
-        self.alpha = float(alpha)
-        self.sync_steps = int(sync_steps)
-
-    def on_step_end(self, args, state, control, **kwargs):
-        if self.ref_model is None:
-            return control
-        if self.sync_steps <= 0:
-            return control
-        if state.global_step == 0 or (state.global_step % self.sync_steps) != 0:
-            return control
-
-        model = kwargs.get("model", None)
-        if model is None:
-            return control
-
-        with torch.no_grad():
-            policy = self.accelerator.unwrap_model(model)
-            ref = self.accelerator.unwrap_model(self.ref_model)
-            for ref_param, policy_param in zip(ref.parameters(), policy.parameters()):
-                if ref_param.data.shape != policy_param.data.shape:
-                    continue
-                ref_param.data.mul_(1.0 - self.alpha).add_(policy_param.data, alpha=self.alpha)
-
-        return control
-
 # Reward function: callable(prompts, completions, ...) -> list[float]
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], List[float]]]
 
 
 class RepeatSampler(Sampler):
     """
-    Sampler that repeats the indices of a dataset in a structured manner.
-
-    Note: this sampler is intentionally rank-agnostic (matches TRL's behavior). In distributed training, the
-    `accelerate`/`transformers.Trainer` dataloader wrapper shards batches across processes. If we shard here too, we risk
-    double-sharding and breaking the `[idx] * num_generations` grouping required by `rewards.view(-1, G)`.
+    Sampler that repeats the dataset multiple times and optionally shuffles.
+    Improved version with clean batch-level sharding and repetition logic.
     """
 
     def __init__(
@@ -167,6 +128,8 @@ class RepeatSampler(Sampler):
         repeat_count: int = 1,
         shuffle: bool = True,
         seed: Optional[int] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self.data_source = data_source
         self.mini_repeat_count = mini_repeat_count
@@ -175,12 +138,16 @@ class RepeatSampler(Sampler):
         self.num_samples = len(data_source)
         self.shuffle = shuffle
         self.seed = seed
+        self.rank = rank
+        self.world_size = world_size
+        # Add attributes for accelerate compatibility
+        self.num_replicas = world_size
 
         if shuffle:
-            # Create a local random generator so we don't depend on global RNG state.
             self.generator = torch.Generator()
             if seed is not None:
-                self.generator.manual_seed(seed)
+                # Use a different seed per rank to avoid identical shuffles across GPUs
+                self.generator.manual_seed(seed + rank)
 
     def __iter__(self):
         if self.shuffle:
@@ -188,18 +155,30 @@ class RepeatSampler(Sampler):
         else:
             indexes = list(range(self.num_samples))
 
-        # Group into batches of `batch_size` unique indices, and drop partials.
-        chunks = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
-        chunks = [chunk for chunk in chunks if len(chunk) == self.batch_size]
+        # Group into batches of 'batch_size' unique indices
+        chunks = [indexes[i : i + self.batch_size] for i in range(0, self.num_samples, self.batch_size)]
+        
+        # Drop partial batches to ensure all chunks have the same size and are easily sharded
+        chunks = [c for c in chunks if len(c) == self.batch_size]
+        
+        # Shard the chunks across GPUs (each GPU gets a subset of full batches)
+        chunks = chunks[self.rank : len(chunks) : self.world_size]
 
         for chunk in chunks:
+            # Each batch is repeated for iterations/buffering (repeat_count)
+            # and each prompt is expanded for multiple generations (mini_repeat_count)
             for _ in range(self.repeat_count):
                 for index in chunk:
                     for _ in range(self.mini_repeat_count):
                         yield index
 
     def __len__(self) -> int:
-        return (self.num_samples // self.batch_size) * self.batch_size * self.mini_repeat_count * self.repeat_count
+        # Total full batches in the dataset
+        total_batches = self.num_samples // self.batch_size
+        # Batches assigned to this rank (standard sharding math)
+        num_rank_batches = (total_batches - self.rank + self.world_size - 1) // self.world_size
+        # Total samples yielded per epoch
+        return num_rank_batches * self.batch_size * self.mini_repeat_count * self.repeat_count
 
 
 # vLLM is optional.
@@ -327,7 +306,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
         if peft_config is not None:
             if not is_peft_available():
                 raise ImportError("PEFT is required to use `peft_config`. Run `pip install peft`.")
-            model = get_peft_model(model, peft_config)
+            model = get_peft_model(model, peft_config, args)
 
         # Tokenizer / processing class
         if processing_class is None:
@@ -343,8 +322,6 @@ class QwenMoleculeGRPOTrainer(Trainer):
         self.pad_token = tokenizer.pad_token
         self.pad_token_id = tokenizer.pad_token_id
         self.eos_token_id = tokenizer.eos_token_id
-        # Keep a stable attribute name across transformers versions.
-        self.processing_class = processing_class
 
         # Reward functions
         if not isinstance(reward_funcs, list):
@@ -404,8 +381,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
         self.vllm_server_timeout = float(getattr(args, "vllm_server_timeout", 60.0))
         self.vllm_ckpt = getattr(args, "vllm_ckpt", None)
         self.vllm_max_model_length = int(getattr(args, "vllm_max_model_length", 4096))
-        self.scale_rewards = getattr(args, "scale_rewards", "group")
-        self.importance_sampling_level = getattr(args, "importance_sampling_level", "token")
+        self.scale_rewards = getattr(args, "scale_rewards", "none")
+        self.importance_sampling_level = getattr(args, "importance_sampling_level", 0)
         self.mask_truncated_completions = getattr(args, "mask_truncated_completions", False)
         self.top_entropy_quantile = getattr(args, "top_entropy_quantile", 1.0)
 
@@ -436,47 +413,35 @@ class QwenMoleculeGRPOTrainer(Trainer):
             generation_kwargs.update(extra_gen_kwargs)
         self.generation_config = GenerationConfig(**generation_kwargs)
 
-        self.loss_type = getattr(args, "loss_type", "grpo") or "grpo"
-        if self.loss_type != "grpo":
-            raise NotImplementedError(
-                f"Only loss_type='grpo' is implemented in this extracted trainer, got {self.loss_type!r}. "
-                "Pass `loss_type='grpo'` when constructing GRPOConfig."
-            )
-
-        # Trainer init (keep compatibility across transformers versions).
-        trainer_init_kwargs = dict(
+        # Disable Trainer scaling; GRPO handles scaling itself
+        super().__init__(
             model=model,
             args=args,
             data_collator=identity,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            processing_class=processing_class,
             callbacks=callbacks,
             optimizers=optimizers,
+            compute_loss_func="non-None value to disable scaling",
         )
-        trainer_sig = inspect.signature(Trainer.__init__).parameters
-        if "processing_class" in trainer_sig:
-            trainer_init_kwargs["processing_class"] = processing_class
-        elif "tokenizer" in trainer_sig:
-            trainer_init_kwargs["tokenizer"] = processing_class
-        super().__init__(**trainer_init_kwargs)
 
         # Reference model (KL)
         self.beta = args.beta
-        self.ref_model = None
-        if self.beta != 0.0:
-            # This trainer computes KL either by disabling PEFT adapters on the policy model (preferred), or by using an
-            # explicitly provided `ref_model` (not implemented here for the multimodal wrapper).
-            wrapper = model
-            inner = getattr(wrapper, "model", None)
-            if inner is None or not hasattr(inner, "disable_adapter"):
-                raise NotImplementedError(
-                    "KL beta != 0 requires a PEFT-wrapped inner model exposing `.disable_adapter()` in this trainer. "
-                    "Either use LoRA/PEFT (recommended) or set `beta=0.0`."
-                )
+        if self.beta == 0.0:
+            self.ref_model = None
+        elif getattr(model, "peft_config", None) is not None:
+            self.ref_model = None
+        else:
+            model_id = model.config._name_or_path
+            config = AutoConfig.from_pretrained(model_id)
+            architecture = getattr(transformers, config.architectures[0])
+            self.ref_model = architecture.from_pretrained(model_id, **model_init_kwargs)
+            self.ref_model.config.use_cache = False
 
         # Metrics/log buffers
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        gen_bs = getattr(args, "generation_batch_size", args.per_device_train_batch_size)
+        gen_bs = getattr(args, "generation_batch_size", args.per_device_train_batch_size * self.num_generations)
         self._logs = {
             "prompt": deque(maxlen=gen_bs),
             "completion": deque(maxlen=gen_bs),
@@ -494,14 +459,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
             self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
 
         if getattr(args, "sync_ref_model", False):
-            self.add_callback(
-                SyncRefModelCallback(
-                    ref_model=self.ref_model,
-                    accelerator=self.accelerator,
-                    alpha=getattr(args, "ref_model_mixup_alpha", 0.6),
-                    sync_steps=getattr(args, "ref_model_sync_steps", 512),
-                )
-            )
+            self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
 
         # ---------------------------------------------------------
         # Optional Liger Kernel init
@@ -590,11 +548,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
 
                 # vLLM will be loaded from a checkpoint path (or model name).
                 vllm_model_id = self.vllm_ckpt or self.model.config._name_or_path
-                vllm_max_num_seqs = (
-                    args.per_device_train_batch_size
-                    * self.vllm_tensor_parallel_size
-                    * getattr(args, "steps_per_generation", 1)
-                )
+                vllm_max_num_seqs = self.num_generations * args.per_device_train_batch_size * self.vllm_tensor_parallel_size * getattr(args, "steps_per_generation", 1)
                 self.llm = LLM(
                     model=vllm_model_id,
                     tensor_parallel_size=self.vllm_tensor_parallel_size,
@@ -697,7 +651,8 @@ class QwenMoleculeGRPOTrainer(Trainer):
             data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
 
         dataloader_params = {
-            "batch_size": self._train_batch_size * getattr(self.args, "steps_per_generation", 1),
+            "batch_size": self._train_batch_size * self.num_generations * getattr(self.args, "steps_per_generation", 1),
+            # "batch_size": self._train_batch_size * self.args.steps_per_generation,
             "collate_fn": data_collator,
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
@@ -718,23 +673,25 @@ class QwenMoleculeGRPOTrainer(Trainer):
     def _get_train_sampler(self, dataset: Optional[Dataset] = None) -> Sampler:
         if dataset is None:
             dataset = self.train_dataset
-
+        
+        # Unique prompts per generation unit
+        prompts_per_step = self.args.per_device_train_batch_size
         steps_per_gen = getattr(self.args, "steps_per_generation", 1)
+        unique_per_gen = prompts_per_step * steps_per_gen
+        
+        # Total repeats needed to keep DataLoader in sync with buffering logic
+        # We need to repeat the same prompts for every iteration AND every buffered step
         total_repeats = self.num_iterations * steps_per_gen
-
-        # `generation_batch_size` is global (across all ranks). We sample `generation_batch_size // G` unique prompts,
-        # then repeat each prompt `G` times contiguously to form full groups.
-        generation_batch_size = getattr(self.args, "generation_batch_size", None)
-        if generation_batch_size is None:
-            generation_batch_size = self.args.per_device_train_batch_size * self.accelerator.num_processes * steps_per_gen
-
+        
         return RepeatSampler(
             data_source=dataset,
             mini_repeat_count=self.num_generations,
-            batch_size=generation_batch_size // self.num_generations,
+            batch_size=unique_per_gen,
             repeat_count=total_repeats,
-            shuffle=getattr(self.args, "shuffle_dataset", True),
+            shuffle=True,
             seed=self.args.seed,
+            rank=self.accelerator.process_index,
+            world_size=self.accelerator.num_processes,
         )
 
     def _compute_logps_single_batch(
@@ -844,8 +801,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
                     mol_prefix_lens = mol_prefix_lens[: logits_full.size(0)]
 
                 j = torch.arange(logits_to_keep, device=logits_full.device, dtype=torch.long).unsqueeze(0)
-                pos = mol_prefix_lens.unsqueeze(1) + prompt_lens.unsqueeze(1) + j - 1
-                pos = pos.clamp(min=0, max=logits_full.size(1) - 1)
+                pos = (mol_prefix_lens.unsqueeze(1) + prompt_lens.unsqueeze(1) + j - 1).clamp(min=0)
                 batch_idx = torch.arange(logits_full.size(0), device=logits_full.device, dtype=torch.long).unsqueeze(1)
                 logits = logits_full[batch_idx, pos]  # (B, T, V)
                 logits = logits / self.temperature
@@ -1131,7 +1087,11 @@ class QwenMoleculeGRPOTrainer(Trainer):
         logits_to_keep = completion_ids.size(1)
 
         mode = "train" if self.model.training else "eval"
-        batch_size = self.args.per_device_train_batch_size if mode == "train" else self.args.per_device_eval_batch_size
+        batch_size = (
+            (self.args.per_device_train_batch_size * self.num_generations * self.args.steps_per_generation)
+            if mode == "train"
+            else self.args.per_device_eval_batch_size
+        )
 
         with torch.no_grad():
             # If num_iterations > 1, we MUST store the logprobs from the sampling policy
@@ -1153,16 +1113,9 @@ class QwenMoleculeGRPOTrainer(Trainer):
                 old_per_token_logps = None
 
             if self.beta != 0.0:
-                wrapper = self.accelerator.unwrap_model(self.model)
-                inner = getattr(wrapper, "model", None)
-                if inner is None or not hasattr(inner, "disable_adapter"):
-                    raise RuntimeError(
-                        "beta != 0.0 requires the inner PEFT model to expose `.disable_adapter()` to compute reference "
-                        "log-probs without allocating a second multimodal model."
-                    )
-                with inner.disable_adapter():
+                with nullcontext():
                     ref_per_token_logps, _ = self._get_per_token_logps_and_entropies(
-                        model=self.model,
+                        model=self.model if self.ref_model is None else self.ref_model,
                         input_ids=prompt_completion_ids,
                         attention_mask=attention_mask,
                         compute_entropy=False,
@@ -1288,8 +1241,7 @@ class QwenMoleculeGRPOTrainer(Trainer):
 
         loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
 
-        # Clipping is active when the clipped objective is the minimum.
-        is_clipped = (per_token_loss2 < per_token_loss1).float()
+        is_clipped = (per_token_loss1 < per_token_loss2).float()
         clip_ratio = (is_clipped * completion_mask).sum() / completion_mask.sum()
         mode = "train" if model.training else "eval"
         self._metrics[mode]["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
@@ -1308,3 +1260,5 @@ class QwenMoleculeGRPOTrainer(Trainer):
             super().log(logs)
         for mode_metrics in self._metrics.values():
             mode_metrics.clear()
+
+

@@ -10,8 +10,8 @@ from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 from config import ModelConfig
 from dataloader import load_grpo_data
 from model_stage3 import Qwen3MoleculeLLM
-from trainer.grpo_trainer import QwenMoleculeGRPOTrainer
-from trainer.grpo_config import GRPOConfig
+from trainer_try2.grpo_trainer import QwenMoleculeGRPOTrainer
+from trainer_try2.grpo_config import GRPOConfig
 
 
 logging.basicConfig(level=logging.INFO)
