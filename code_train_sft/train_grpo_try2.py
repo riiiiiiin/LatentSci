@@ -98,6 +98,23 @@ _PROMPT_EXPECT_RE = re.compile(
     r"formatted as\s*<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL
 )
 
+_RDKit_LOGS_DISABLED = False
+
+
+def _get_rdkit_chem():
+    global _RDKit_LOGS_DISABLED
+    try:
+        from rdkit import Chem  # type: ignore
+        from rdkit import RDLogger  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise ImportError("RDKit is required for SMILES rewards.") from e
+
+    if not _RDKit_LOGS_DISABLED:
+        RDLogger.DisableLog("rdApp.error")
+        RDLogger.DisableLog("rdApp.warning")
+        _RDKit_LOGS_DISABLED = True
+    return Chem
+
 
 def _is_smiles_task(prompt: str) -> bool:
     # `extract_fields()` rewrites many tasks to include:
@@ -149,10 +166,7 @@ def reward_answer_type_validity(prompts: List[str], completions: List[str], comp
 
         cleaned = answer.strip().strip("\"'`")
         if expected == "smiles":
-            try:
-                from rdkit import Chem  # type: ignore
-            except Exception as e:  # pragma: no cover
-                raise ImportError("RDKit is required for SMILES validity reward.") from e
+            Chem = _get_rdkit_chem()
 
             cleaned = re.sub(r"^\s*smiles\s*[:=]\s*", "", cleaned, flags=re.IGNORECASE).strip()
             candidates = [cleaned]
@@ -223,10 +237,7 @@ def reward_answer_correctness(
         gold_clean = (gold or "").strip().strip("\"'`")
 
         if expected == "smiles":
-            try:
-                from rdkit import Chem  # type: ignore
-            except Exception as e:  # pragma: no cover
-                raise ImportError("RDKit is required for SMILES correctness reward.") from e
+            Chem = _get_rdkit_chem()
 
             def canon(s: str) -> Optional[str]:
                 s = re.sub(r"^\s*smiles\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
