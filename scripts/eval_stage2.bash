@@ -2,7 +2,7 @@ set -euo pipefail
 
 # exp
 EXP_NAME=<exp_name>
-STAGE1_EXP_NAME=<stage_1_exp_name>
+CKPT_DIR_NAME=<ckpt_name>
 DATASET_NAME=ChemCoTBench
 CUDA_DEVICES=0,1
 
@@ -14,9 +14,9 @@ TOP_P=0.8
 
 SCRIPT_PATH="code_train_sft/train_sft_stage2.py"
 OUTPUT_DIR="outputs/${EXP_NAME}"
-STAGE1_DIR="outputs/${STAGE1_EXP_NAME}"
-LORA_PATH="${STAGE1_DIR}/lora_weights"
-PROJECTOR_PATH="${STAGE1_DIR}/projector.pt"
+CKPT_DIR="outputs/${CKPT_DIR_NAME}"
+LORA_PATH="${CKPT_DIR}/lora_weights"
+PROJECTOR_PATH="${CKPT_DIR}/projector.pt"
 DATA_PATH="data/${DATASET_NAME}"
 
 PYTHON_BIN="python"
@@ -27,11 +27,11 @@ INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/inference_results_${TIMESTAMP}.json"
 
 echo "========== Stage-2 Inference & Eval Runner =========="
 echo "EXP_NAME:             ${EXP_NAME}"
-echo "STAGE1_EXP_NAME:      ${STAGE1_EXP_NAME}"
+echo "CKPT_DIR_NAME:        ${CKPT_DIR_NAME}"
 echo "DATASET_NAME:         ${DATASET_NAME}"
 echo "SCRIPT_PATH:          ${SCRIPT_PATH}"
 echo "OUTPUT_DIR:           ${OUTPUT_DIR}"
-echo "STAGE1_DIR:           ${STAGE1_DIR}"
+echo "CKPT_DIR:             ${CKPT_DIR}"
 echo "LORA_PATH:            ${LORA_PATH}"
 echo "PROJECTOR_PATH:       ${PROJECTOR_PATH}"
 echo "DATA_PATH:            ${DATA_PATH}"
@@ -43,35 +43,35 @@ fi
 echo "PYTHON:               ${PYTHON_BIN}"
 echo "====================================================="
 
-# 基本检查
+# Basic checks
 if [[ ! -f "${SCRIPT_PATH}" ]]; then
-  echo "ERROR: 推理脚本未找到: ${SCRIPT_PATH}"
+  echo "ERROR: Inference script not found : ${SCRIPT_PATH}"
   exit 3
 fi
 
 if [[ ! -d "${LORA_PATH}" ]]; then
-  echo "ERROR: Stage-1 LoRA 目录未找到: ${LORA_PATH}"
+  echo "ERROR: LoRA ckpt dir not found: ${LORA_PATH}"
   exit 4
 fi
 
 if [[ ! -f "${PROJECTOR_PATH}" ]]; then
-  echo "ERROR: Stage-1 projector 文件未找到: ${PROJECTOR_PATH}"
+  echo "ERROR: Projector ckpt file not found: ${PROJECTOR_PATH}"
   exit 5
 fi
 
 if [[ ! -e "${DATA_PATH}" ]]; then
-  echo "ERROR: 数据路径未找到: ${DATA_PATH}"
+  echo "ERROR: Data dir not found: ${DATA_PATH}"
   exit 6
 fi
 
-# 创建输出目录
+# logging setup
 mkdir -p "${OUTPUT_DIR}"
-LOG_FILE="${OUTPUT_DIR}/stage2_inference_and_eval_${TIMESTAMP}.log"
+LOG_FILE="${OUTPUT_DIR}/logs/stage2_inference_and_eval_${TIMESTAMP}.log"
 
-# ---- 启动多进程推理（每张 GPU 一个进程） ----
+# multi gpu multi process inference
 echo "$(date +'%Y-%m-%d %H:%M:%S') - Launching inference per-GPU..." | tee -a "${LOG_FILE}"
 
-# 解析 CUDA_DEVICES 列表为数组
+# parse CUDA_VISIBLE_DEVICES into array
 IFS=',' read -ra GPU_ARRAY <<< "${CUDA_DEVICES}"
 NUM_PROCS=${#GPU_ARRAY[@]}
 
@@ -80,11 +80,10 @@ for idx in "${!GPU_ARRAY[@]}"; do
   GPU_ID="${GPU_ARRAY[idx]}"
   PROC_INDEX="${idx}"
 
-  # per-process result & log file，避免覆盖
-  RESULTS_PATH_PROC="${OUTPUT_DIR}/inference_results_${TIMESTAMP}.proc${PROC_INDEX}.json"
-  LOG_FILE_PROC="${OUTPUT_DIR}/stage2_inference_and_eval_${TIMESTAMP}.proc${PROC_INDEX}.log"
+  # per-process result & log file
+  RESULTS_PATH_PROC="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.proc${PROC_INDEX}.json"
+  LOG_FILE_PROC="${OUTPUT_DIR}/logs/stage2_inference_and_eval_${TIMESTAMP}.proc${PROC_INDEX}.log"
 
-  # 构造命令（在环境变量前缀里设置 CUDA_VISIBLE_DEVICES 以便只看到该卡）
   CMD=( "${PYTHON_BIN}" "${SCRIPT_PATH}"
         --mode inference
         --output_dir "${OUTPUT_DIR}"
@@ -104,14 +103,13 @@ for idx in "${!GPU_ARRAY[@]}"; do
         --gpu "${GPU_ID}"
   )
 
-  # 打印并后台启动（日志重定向到 per-process log）
   echo "Launching proc ${PROC_INDEX} on GPU ${GPU_ID}: ${CMD_ENV[*]} ${CMD[*]}" | tee -a "${LOG_FILE}"
   ( env CUDA_VISIBLE_DEVICES="${GPU_ID}" HF_DATASETS_CACHE="${OUTPUT_DIR}/hf_cache_proc${PROC_INDEX}" "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE_PROC}" ) &
 
   PIDS+=($!)
 done
 
-# 等待所有后台进程完成
+# wait for all processes to finish
 for p in "${PIDS[@]}"; do
   wait "${p}" || {
     echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: One of inference processes failed (pid=${p})." | tee -a "${LOG_FILE}"
@@ -121,13 +119,13 @@ done
 
 echo "$(date +'%Y-%m-%d %H:%M:%S') - All inference processes finished successfully." | tee -a "${LOG_FILE}"
 
-# ---- 2) 进入 eval 目录并运行 eval_results.py ----
+# cd and eval
 if [[ ! -d "eval" ]]; then
-  echo "ERROR: eval 目录不存在，请确认 eval/eval_results.py 在 eval/ 下." | tee -a "${LOG_FILE}"
+  echo "ERROR: eval dir not found." | tee -a "${LOG_FILE}"
   exit 12
 fi
 
-# 使用绝对路径给 eval 脚本（防止相对路径问题）
+# use abs path for eval
 ABS_RESULT_PATH="$(cd "$(dirname "${INFERENCE_RESULTS_PATH}")"; pwd)/$(basename "${INFERENCE_RESULTS_PATH}")"
 echo "Preparing to run evaluation in ./eval with result_path = ${ABS_RESULT_PATH}" | tee -a "${LOG_FILE}"
 
