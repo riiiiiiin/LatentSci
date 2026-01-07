@@ -80,12 +80,13 @@ def format_reward_answer_tag(prompts: List[str], completions: List[str], complet
     for c in completions:
         c = c or ""
         lo = c.lower()
-        has = ("<answer>" in lo) and ("</answer>" in lo)
-        if not has:
+        start = lo.find("<answer>")
+        end = lo.find("</answer>")
+        if start == -1 or end == -1 or end <= start:
             rewards.append(0.0)
             continue
         try:
-            inner = lo.split("<answer>", 1)[1].split("</answer>", 1)[0].strip()
+            inner = c[start + len("<answer>") : end].strip()
             rewards.append(1.0 if len(inner) > 0 else 0.0)
         except Exception:
             rewards.append(0.0)
@@ -196,8 +197,6 @@ def reward_answer_type_validity(prompts: List[str], completions: List[str], comp
             lo = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", lo).strip()
             if lo in {"yes", "no"}:
                 rewards.append(1.0)
-            elif lo in {"true", "false"}:
-                rewards.append(1.0)
             else:
                 rewards.append(0.0)
         else:
@@ -240,7 +239,6 @@ def reward_answer_correctness(
             Chem = _get_rdkit_chem()
 
             def canon(s: str) -> Optional[str]:
-                s = re.sub(r"^\s*smiles\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
                 try:
                     mol = Chem.MolFromSmiles(s)  # type: ignore[attr-defined]
                 except Exception:
@@ -257,8 +255,6 @@ def reward_answer_correctness(
             rewards.append(1.0 if (pred_can is not None and gold_can is not None and pred_can == gold_can) else 0.0)
         elif expected == "number":
             def parse_num(s: str) -> Optional[float]:
-                s = re.sub(r"^\s*(count|number)\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
-                s = s.replace(",", "")
                 try:
                     return float(s)
                 except Exception:
@@ -273,10 +269,9 @@ def reward_answer_correctness(
         elif expected == "yesno":
             def norm_yesno(s: str) -> Optional[str]:
                 s = s.strip().lower()
-                s = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", s).strip()
-                if s in {"yes", "y", "true"}:
+                if s in {"yes"}:
                     return "yes"
-                if s in {"no", "n", "false"}:
+                if s in {"no"}:
                     return "no"
                 return None
 
