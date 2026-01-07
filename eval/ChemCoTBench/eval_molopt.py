@@ -24,7 +24,7 @@ def eval_molopt_from_list(optimized_prop, gt_list, pred_list, total_number):
     
     return result_dict
     
-def evaluate_molopt_score(model_name, gt_path):
+def evaluate_molopt_score(model_name, gt_path, logs_dir):
     ## 在get_molopt_cot中得到test结果, 我们评测这些test结果
     prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
     # prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', gsk='gsk3b')
@@ -35,7 +35,7 @@ def evaluate_molopt_score(model_name, gt_path):
     
     for prop in prop_dict.keys():
         logger.info(f'evaluating {prop} for model {model_name}')
-        file_name = f"logs/{prop}/{model_name}.json"
+        file_name = f"{logs_dir}/{prop}/{model_name}.json"
         pred_results = json.load(open(file_name, "r"))
         
                 

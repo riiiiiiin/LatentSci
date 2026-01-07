@@ -125,15 +125,9 @@ if [[ ! -d "eval" ]]; then
   exit 12
 fi
 
-# use abs path for eval
-ABS_RESULT_PATH="$(cd "$(dirname "${INFERENCE_RESULTS_PATH}")"; pwd)/$(basename "${INFERENCE_RESULTS_PATH}")"
-echo "Preparing to run evaluation in ./eval with result_path = ${ABS_RESULT_PATH}" | tee -a "${LOG_FILE}"
-
-pushd eval > /dev/null
-
 EVAL_CMD=(
-  "${PYTHON_BIN}" "eval_results.py"
-  --result_path "${ABS_RESULT_PATH}"
+  "${PYTHON_BIN}" "eval/eval_results.py"
+  --result_path "${RESULT_PATH}"
   --log_name "${LOG_NAME}"
 )
 

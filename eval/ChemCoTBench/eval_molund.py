@@ -44,7 +44,7 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     
     return my_dict
     
-def evaluate_molund_score(model_name, gt_path):
+def evaluate_molund_score(model_name, gt_path, logs_dir):
     logger = logging.getLogger(__name__)
     task_dict = dict(
         fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',
@@ -56,7 +56,7 @@ def evaluate_molund_score(model_name, gt_path):
     for task in task_dict.keys():
         logger.info(f'evaluating {task} for model {model_name}')
         if 'llama' not in model_name:
-            file_name = f"logs/{task_dict[task]}/{model_name}.json"
+            file_name = f"{logs_dir}/{task_dict[task]}/{model_name}.json"
             
         pred_results = json.load(open(file_name, "r"))
         invalid_number = 0

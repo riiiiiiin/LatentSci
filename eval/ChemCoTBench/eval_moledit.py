@@ -383,12 +383,12 @@ def eval_moledit_from_list(src_list, pred_list, group_a, group_b, task, total_nu
     }
     return my_dict
     
-def evaluate_moledit_score(model_name, gt_path): 
+def evaluate_moledit_score(model_name, gt_path, logs_dir): 
     result_dict = dict()
     
     for task in ['add', 'delete', 'sub']:
         logger.info(f'evaluating {task} for model {model_name}')
-        file_name = f"logs/{task}/{model_name}.json" 
+        file_name = f"{logs_dir}/{task}/{model_name}.json" 
         pred_results = json.load(open(file_name, "r"))
         
         gt_name = f"{gt_path}/{task}.json"

@@ -4,7 +4,7 @@ from ChemCoTBench.core.utils import extract_answer
 import logging
 import os
 
-from .rxn.evaluator import MoleculeSMILESEvaluator
+from .core.evaluator import MoleculeSMILESEvaluator
 evaluator = MoleculeSMILESEvaluator()
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,8 @@ subtask_to_result_key = {
     "retro": "Reactants"
 }
 
-def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir: str = None):
-    if log_dir is None:
-        log_dir = f"logs/{subtask}"
+def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir):
+    log_dir = f"{log_dir}/{subtask}"
     
     if not os.path.exists(log_dir):
         raise ValueError(f"logs_dir {log_dir} is not correct")
@@ -53,7 +52,7 @@ def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir: str = None):
         
     return res
 
-def evaluate_MechSel(model_name: str, gt_path, logs_dir: str = 'logs/mechsel'):
+def evaluate_MechSel(model_name: str, gt_path, logs_dir):
     """
     Evaluate the reaction mechanism selection prediction.
 
@@ -64,6 +63,7 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir: str = 'logs/mechsel'):
     Returns:
         None
     """
+    logs_dir = f"{logs_dir}/mechsel"
     if not os.path.exists(logs_dir):
         raise ValueError(f"logs_dir {logs_dir} is not correct")
     samples = read_json(f"{logs_dir}/{model_name}.json")
@@ -86,16 +86,16 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir: str = 'logs/mechsel'):
     accuracy = sum(1 for pred, gt in zip(preds, gts) if pred == gt) / len(gts)
     return {"MCQ Accuracy (mean)": accuracy}
 
-def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str = 'logs'):
+def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str):
     all_results = {}
     subtasks = subtask_to_result_key.keys()
     for subtask in subtasks:
         logger.info(f'evaluating {subtask} for model {model_name}')
         try:
             if subtask == 'MechSel' or subtask == 'mechsel':
-                all_results[subtask] = evaluate_MechSel(model_name, gt_path)
+                all_results[subtask] = evaluate_MechSel(model_name, gt_path, logs_dir)
             else:
-                all_results[subtask] = evaluate_mol(model_name, subtask, gt_path)
+                all_results[subtask] = evaluate_mol(model_name, subtask, gt_path, logs_dir)
         except Exception as e:
             logger.error(f"Error evaluating {subtask} for {model_name}: {e}")
             all_results[subtask] = None
