@@ -405,6 +405,7 @@ def load_grpo_data(path):
     Returns a HuggingFace `Dataset` with (at least):
     - `prompt`: str
     - `input_smiles`: list[str]
+    - `label`: str (ground-truth answer wrapped as `<answer> ... </answer>`, used for reward shaping)
 
     Tokenization/collation should be handled by the GRPO trainer's collate function.
     """
@@ -430,7 +431,7 @@ def load_grpo_data(path):
 
     # Keep only what GRPO needs
     dataset = dataset.rename_column("query", "prompt")
-    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("prompt", "input_smiles")])
+    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("prompt", "input_smiles", "label")])
     return dataset
 
 

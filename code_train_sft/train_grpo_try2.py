@@ -1,8 +1,10 @@
 import os
 import argparse
 import logging
+import re
+import math
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
@@ -87,6 +89,192 @@ def format_reward_answer_tag(prompts: List[str], completions: List[str], complet
             rewards.append(1.0 if len(inner) > 0 else 0.0)
         except Exception:
             rewards.append(0.0)
+    return rewards
+
+
+_ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
+
+_PROMPT_EXPECT_RE = re.compile(
+    r"formatted as\s*<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL
+)
+
+
+def _is_smiles_task(prompt: str) -> bool:
+    # `extract_fields()` rewrites many tasks to include:
+    # "Your final answer must be formatted as <answer> SMILES </answer>"
+    return bool(re.search(r"<answer>\s*smiles\b", prompt, flags=re.IGNORECASE))
+
+
+def _infer_expected_answer_type(prompt: str) -> str:
+    """
+    Infer the expected answer type from the prompt formatting instruction inserted by `extract_fields()`.
+
+    Returns: one of {"smiles", "number", "yesno", "unknown"}.
+    """
+    m = _PROMPT_EXPECT_RE.search(prompt or "")
+    if not m:
+        return "unknown"
+    spec = (m.group(1) or "").strip().lower()
+    if "smiles" in spec:
+        return "smiles"
+    if "yes" in spec and "no" in spec:
+        return "yesno"
+    if "number" in spec:
+        return "number"
+    return "unknown"
+
+
+def _extract_answer_text(completion: str) -> Optional[str]:
+    m = _ANSWER_RE.search(completion or "")
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def reward_answer_type_validity(prompts: List[str], completions: List[str], completion_ids=None, **kwargs):
+    """
+    Reward 1.0 if the `<answer>...</answer>` content matches the *type* the prompt asks for:
+    - SMILES: RDKit parses
+    - Number: parses as float
+    - Yes/No: matches yes/no (case-insensitive)
+    Otherwise reward 0.0.
+    """
+    rewards: list[float] = []
+    for p, c in zip(prompts, completions):
+        expected = _infer_expected_answer_type(p)
+        answer = _extract_answer_text(c or "")
+        if not answer:
+            rewards.append(0.0)
+            continue
+
+        cleaned = answer.strip().strip("\"'`")
+        if expected == "smiles":
+            try:
+                from rdkit import Chem  # type: ignore
+            except Exception as e:  # pragma: no cover
+                raise ImportError("RDKit is required for SMILES validity reward.") from e
+
+            cleaned = re.sub(r"^\s*smiles\s*[:=]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+            candidates = [cleaned]
+            if re.search(r"\s", cleaned):
+                candidates.append(cleaned.split()[0])
+
+            ok = False
+            for cand in candidates:
+                try:
+                    mol = Chem.MolFromSmiles(cand)  # type: ignore[attr-defined]
+                except Exception:
+                    mol = None
+                if mol is not None:
+                    ok = True
+                    break
+            rewards.append(1.0 if ok else 0.0)
+        elif expected == "number":
+            cleaned = re.sub(r"^\s*(count|number)\s*[:=]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+            cleaned = cleaned.replace(",", "")
+            try:
+                float(cleaned)
+                rewards.append(1.0)
+            except Exception:
+                rewards.append(0.0)
+        elif expected == "yesno":
+            lo = cleaned.lower()
+            lo = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", lo).strip()
+            if lo in {"yes", "no"}:
+                rewards.append(1.0)
+            elif lo in {"true", "false"}:
+                rewards.append(1.0)
+            else:
+                rewards.append(0.0)
+        else:
+            rewards.append(0.0)
+
+    return rewards
+
+
+def reward_answer_correctness(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    label: Optional[List[str]] = None,
+    labels: Optional[List[str]] = None,
+    **kwargs,
+):
+    """
+    Reward 1.0 if the extracted `<answer>...</answer>` matches the ground-truth label.
+
+    Requires `load_grpo_data()` to keep the `label` column.
+    """
+    gt_list = labels if labels is not None else label
+    if gt_list is None:
+        # If labels are not present in the dataset, this reward is disabled.
+        return [0.0 for _ in completions]
+
+    rewards: list[float] = []
+    for p, c, gt in zip(prompts, completions, gt_list):
+        expected = _infer_expected_answer_type(p)
+        pred = _extract_answer_text(c or "")
+        gold = _extract_answer_text(gt or "") or (gt or "").strip()
+        if pred is None:
+            rewards.append(0.0)
+            continue
+
+        pred_clean = pred.strip().strip("\"'`")
+        gold_clean = (gold or "").strip().strip("\"'`")
+
+        if expected == "smiles":
+            try:
+                from rdkit import Chem  # type: ignore
+            except Exception as e:  # pragma: no cover
+                raise ImportError("RDKit is required for SMILES correctness reward.") from e
+
+            def canon(s: str) -> Optional[str]:
+                s = re.sub(r"^\s*smiles\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
+                try:
+                    mol = Chem.MolFromSmiles(s)  # type: ignore[attr-defined]
+                except Exception:
+                    mol = None
+                if mol is None:
+                    return None
+                try:
+                    return Chem.MolToSmiles(mol, canonical=True)  # type: ignore[attr-defined]
+                except Exception:
+                    return None
+
+            pred_can = canon(pred_clean)
+            gold_can = canon(gold_clean)
+            rewards.append(1.0 if (pred_can is not None and gold_can is not None and pred_can == gold_can) else 0.0)
+        elif expected == "number":
+            def parse_num(s: str) -> Optional[float]:
+                s = re.sub(r"^\s*(count|number)\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
+                s = s.replace(",", "")
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+
+            pn = parse_num(pred_clean)
+            gn = parse_num(gold_clean)
+            if pn is None or gn is None:
+                rewards.append(0.0)
+            else:
+                rewards.append(1.0 if math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3) else 0.0)
+        elif expected == "yesno":
+            def norm_yesno(s: str) -> Optional[str]:
+                s = s.strip().lower()
+                s = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", s).strip()
+                if s in {"yes", "y", "true"}:
+                    return "yes"
+                if s in {"no", "n", "false"}:
+                    return "no"
+                return None
+
+            py = norm_yesno(pred_clean)
+            gy = norm_yesno(gold_clean)
+            rewards.append(1.0 if (py is not None and gy is not None and py == gy) else 0.0)
+        else:
+            rewards.append(1.0 if pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "" else 0.0)
+
     return rewards
 
 
@@ -208,7 +396,7 @@ def main():
     trainer = QwenMoleculeGRPOTrainer(
         model=model,
         args=grpo_args,
-        reward_funcs=format_reward_answer_tag,
+        reward_funcs=[format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness],
         train_dataset=train_dataset,
         processing_class=model.tokenizer,
     )
