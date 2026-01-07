@@ -21,11 +21,16 @@ pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 
 
 # new env:
 
-conda env create -f biolatent_environment1.yml
+conda env create -f biolatent_environment2.yml
 
 conda activate biolatenecot_dev
 
 pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm
+
+
+# 0107-1:
+
+pip install trl==0.26.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm==0.11.2
 ```
 
 📊 Data Preparation
