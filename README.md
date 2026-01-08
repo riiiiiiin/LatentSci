@@ -30,6 +30,10 @@ pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plo
 
 # 0107-1:
 
+conda env create -f biolatent_environment2.yml
+
+conda activate biolatenecot_dev
+
 pip install trl==0.26.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm==0.11.2
 ```
 
@@ -108,6 +112,25 @@ accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
   --batch_size 2 \
   --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
+accelerate launch --multi_gpu --num_processes 2 train_grpo_try2.py \
+  --output_dir debug \
+  --batch_size 1 \
+  --grad_accum 4 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max_prompt_length 2048 \
+  --max_completion_length 256 \
+  --num_generations 8 \
+  --steps_per_generation 4 \
+  --num_iterations 1 \
+  --beta 0.0 \
+  --use_liger \
+  --use_vllm \
+  --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.4 \
+  --vllm_max_model_len 4096 \
+  --gradient_checkpointing
+  
 ```
 
 

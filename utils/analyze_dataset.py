@@ -2,6 +2,7 @@ import sys
 import os
 import glob
 import json
+import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 
@@ -14,7 +15,7 @@ sys.path.append(train_code_path)
 # 现在可以从 dataloader 导入 extract_fields
 from dataloader import extract_fields
 
-def analyze_max_steps(data_path):
+def analyze_dataset_stats(data_path):
     print(f"Scanning data from: {data_path}")
     
     # 扫描所有 JSON 文件并排除 rxn/rcr.json
@@ -26,14 +27,18 @@ def analyze_max_steps(data_path):
     # 使用 datasets 加载（不进行 tokenization，只做字段提取）
     ds = load_dataset("json", data_files=data_files)["train"]
     
+    step_counts = []
+    char_lengths = []
+    
     max_steps = 0
     max_example_id = None
-    step_counts = []
 
-    print("Analyzing steps in each example...")
+    print("Analyzing examples...")
     for example in tqdm(ds):
         try:
             processed = extract_fields(example)
+            
+            # 1. 步骤数分析
             steps = processed.get("cot_steps", [])
             num_steps = len(steps)
             step_counts.append(num_steps)
@@ -41,6 +46,11 @@ def analyze_max_steps(data_path):
             if num_steps > max_steps:
                 max_steps = num_steps
                 max_example_id = example.get("id")
+                
+            # 2. CoT 文本长度分析 (字符数)
+            cot_text = processed.get("cot", "")
+            char_lengths.append(len(cot_text))
+            
         except Exception:
             continue
 
@@ -48,15 +58,27 @@ def analyze_max_steps(data_path):
         print("No valid data found.")
         return
 
-    avg_steps = sum(step_counts) / len(step_counts)
-    
+    def print_dist(name, data):
+        data = np.array(data)
+        print(f"\n--- {name} Distribution ---")
+        print(f"Min:    {np.min(data)}")
+        print(f"Max:    {np.max(data)}")
+        print(f"Mean:   {np.mean(data):.2f}")
+        print(f"Std:    {np.std(data):.2f}")
+        print(f"Quantiles:")
+        for q in [25, 50, 75, 90, 95, 99]:
+            print(f"  {q}%: {np.percentile(data, q)}")
+
     print("\n" + "="*40)
-    print("📊 DATASET STEP ANALYSIS")
+    print("📊 DATASET ANALYSIS REPORT")
     print("="*40)
     print(f"Total valid examples: {len(step_counts)}")
-    print(f"Maximum steps:        {max_steps}")
-    print(f"Average steps:        {avg_steps:.2f}")
-    print(f"Example ID with max:  {max_example_id}")
+    
+    print_dist("CoT Step Count", step_counts)
+    print_dist("CoT Char Length", char_lengths)
+    
+    print("\n" + "="*40)
+    print(f"Maximum steps example ID: {max_example_id}")
     print("="*40)
     
     # 给出一个建议的 max_latent_stage
@@ -65,5 +87,5 @@ def analyze_max_steps(data_path):
 
 if __name__ == "__main__":
     DATA_PATH = "/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot"
-    analyze_max_steps(DATA_PATH)
+    analyze_dataset_stats(DATA_PATH)
 
