@@ -675,7 +675,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
         # =========================================================
         has_latent = (input_ids == self.latent_id).any().item()
-        refine_bio_tokens = kwargs.pop("refine_bio_tokens", True) # 是否开启分子证据精炼
+        kwargs.pop("refine_bio_tokens", None)
+        refine_bio_tokens = True
 
         model_input_embeds = final_embeds
 
@@ -702,8 +703,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 model_input_embeds,
                 final_attn_mask,
                 task_latent_positions_list,
-                bio_positions=None,
-                refine_bio_tokens=False,
+                bio_positions=bio_positions_list,
+                refine_bio_tokens=True,
                 task_thinker=self.task_thinker,
                 apply_task_thinker=True,
             )
@@ -790,6 +791,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             raise ValueError(f"corrupt_task_latents length mismatch: got {len(corrupt_flags)} expected {B}")
 
         self._last_task_latent_counts = [0 for _ in range(B)]
+        refine_bio_tokens = True
 
         # =========================================================
         # 1. Molecule features: flatten + batch projection
@@ -949,8 +951,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     task_latent_counts.append(0)
                     continue
                 # We appended <start_latent> at the end.
-                base_prefix = seq[:-1].unsqueeze(0)  # [1, L-1, d]
-                latent_block = seq[-1:].unsqueeze(0)  # [1, 1, d] (starts with <start_latent>)
+                base_prefix = seq[:-1].unsqueeze(0).clone()  # [1, L-1, d]
+                latent_block = seq[-1:].unsqueeze(0).clone()  # [1, 1, d] (starts with <start_latent>)
+                latent_state_hist = []
+                bio_positions = bio_positions_list[b]
 
                 ended = False
                 for _ in range(int(self.task_latent_max_steps)):
@@ -969,7 +973,15 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         ended = True
                         break
 
-                    new_latent = out.hidden_states[-1][:, -1:, :].to(dtype=self.model.dtype)
+                    latent_state = out.hidden_states[-1][:, -1:, :].to(dtype=torch.float32)
+                    latent_state_hist.append(latent_state)
+                    if refine_bio_tokens and bio_positions:
+                        batched_bio = base_prefix[:, bio_positions].to(dtype=self.model.dtype)
+                        batched_lat = torch.cat(latent_state_hist, dim=1).to(dtype=self.model.dtype)
+                        refined = self.bio_updater(batched_bio, batched_lat)
+                        base_prefix[:, bio_positions] = refined.to(dtype=base_prefix.dtype)
+
+                    new_latent = latent_state.to(dtype=self.model.dtype)
                     new_latent = self.task_thinker(new_latent)
                     latent_block = torch.cat([latent_block, new_latent], dim=1)
 
