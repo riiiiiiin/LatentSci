@@ -47,6 +47,13 @@ def _ensure_lora_and_trainables(model: Qwen3MoleculeLLM):
         p.requires_grad = True
     for p in model.bio_updater.parameters():
         p.requires_grad = True
+    if getattr(model, "is_both_latent", False):
+        if hasattr(model, "bio_thinker"):
+            for p in model.bio_thinker.parameters():
+                p.requires_grad = True
+        if hasattr(model, "task_thinker"):
+            for p in model.task_thinker.parameters():
+                p.requires_grad = True
 
 
 def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_path=None):
@@ -65,6 +72,10 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         checkpoint = torch.load(mm_projector_path, map_location=device)
         model.projector.load_state_dict(checkpoint["projector"])
         model.bio_updater.load_state_dict(checkpoint.get("bio_updater", {}), strict=False)
+        if hasattr(model, "bio_thinker"):
+            model.bio_thinker.load_state_dict(checkpoint.get("bio_thinker", {}), strict=False)
+        if hasattr(model, "task_thinker"):
+            model.task_thinker.load_state_dict(checkpoint.get("task_thinker", {}), strict=False)
         logger.info("Loaded projector (+ bio_updater if present).")
 
     return model
@@ -284,8 +295,97 @@ def reward_answer_correctness(
     return rewards
 
 
+def reward_stage4_corrupt_or_correct(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    label: Optional[List[str]] = None,
+    labels: Optional[List[str]] = None,
+    corrupt_task_latents: Optional[List[bool]] = None,
+    **kwargs,
+):
+    """
+    Stage 4 reward:
+    - If corrupted: reward = -1 if correct else 0
+    - If not corrupted: reward = correctness (1 if correct else 0)
+    """
+    gt_list = labels if labels is not None else label
+    if gt_list is None:
+        return [0.0 for _ in completions]
+
+    if corrupt_task_latents is None:
+        corrupt_task_latents = [False for _ in completions]
+
+    correctness = reward_answer_correctness(
+        prompts=prompts,
+        completions=completions,
+        completion_ids=completion_ids,
+        labels=gt_list,
+    )
+    out: list[float] = []
+    for is_corrupt, corr in zip(corrupt_task_latents, correctness, strict=True):
+        is_correct = bool(corr >= 0.5)
+        if is_corrupt:
+            out.append(-1.0 if is_correct else 0.0)
+        else:
+            out.append(1.0 if is_correct else 0.0)
+    return out
+
+
+def reward_stage4_scaled_correctness(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    label: Optional[List[str]] = None,
+    labels: Optional[List[str]] = None,
+    corrupt_task_latents: Optional[List[bool]] = None,
+    task_latent_count: Optional[List[int]] = None,
+    **kwargs,
+):
+    """
+    Stage 4 reward (latent-scaled):
+    - If corrupted: reward = 0
+    - If not corrupted:
+        - correct: +1 / N
+        - wrong:   -1 / N
+      where N = number of task latent tokens (clamped to >= 1).
+    """
+    gt_list = labels if labels is not None else label
+    if gt_list is None:
+        return [0.0 for _ in completions]
+
+    if corrupt_task_latents is None:
+        corrupt_task_latents = [False for _ in completions]
+    if task_latent_count is None:
+        task_latent_count = [1 for _ in completions]
+
+    correctness = reward_answer_correctness(
+        prompts=prompts,
+        completions=completions,
+        completion_ids=completion_ids,
+        labels=gt_list,
+    )
+    out: list[float] = []
+    for is_corrupt, corr, n in zip(corrupt_task_latents, correctness, task_latent_count, strict=True):
+        if is_corrupt:
+            out.append(0.0)
+            continue
+        n_latents = int(n) if n is not None else 0
+        n_latents = max(n_latents, 1)
+        is_correct = bool(corr >= 0.5)
+        out.append((1.0 / n_latents) if is_correct else (-1.0 / n_latents))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="GRPO try1 training for Bio-LatentCOT (smiles-aware, optional vLLM).")
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=3,
+        choices=[3, 4],
+        help="GRPO training stage (3=baseline rewards, 4=latent-corrupt rewards + masking).",
+    )
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
 
     # Load starting weights (optional)
@@ -305,6 +405,26 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_prompt_length", type=int, default=2048)
     parser.add_argument("--max_completion_length", type=int, default=256)
+
+    # Stage 4: task-latent corruption
+    parser.add_argument(
+        "--corrupt_prob",
+        type=float,
+        default=0.0,
+        help="Probability to corrupt task latent embeddings per prompt group (stage=4 only).",
+    )
+    parser.add_argument(
+        "--corrupt_latent_noise_std",
+        type=float,
+        default=0.0,
+        help="Std of Gaussian noise to replace task latent embeddings (0 -> zeros) (stage=4 only).",
+    )
+    parser.add_argument(
+        "--is_both_latent",
+        type=lambda x: (str(x).lower() == "true"),
+        default=True,
+        help="Enable task-latent generation via is_both_latent (stage=4 requires true).",
+    )
 
     # GRPO
     parser.add_argument("--num_generations", type=int, default=2)
@@ -345,7 +465,15 @@ def main():
         "input_dim": ModelConfig.INPUT_DIM,
         "num_heads": ModelConfig.NUM_HEADS,
     }
-    model = Qwen3MoleculeLLM(qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH, mol_config=mol_config)
+    use_both_latent = bool(args.is_both_latent)
+    if args.stage == 4 and not use_both_latent:
+        raise ValueError("stage=4 requires --is_both_latent true.")
+    model = Qwen3MoleculeLLM(
+        qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
+        mol_config=mol_config,
+        is_both_latent=use_both_latent,
+        is_coconut=False,
+    )
 
     # 2) Load weights if provided
     if args.lora_path or args.projector_path:
@@ -399,12 +527,24 @@ def main():
         use_liger_manual=args.use_liger,
     )
 
+    if args.stage == 4:
+        reward_funcs = [reward_stage4_corrupt_or_correct, reward_stage4_scaled_correctness]
+        corrupt_prob = float(args.corrupt_prob)
+        corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
+    else:
+        reward_funcs = [format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness]
+        corrupt_prob = 0.0
+        corrupt_latent_noise_std = 0.0
+
     trainer = QwenMoleculeGRPOTrainer(
         model=model,
         args=grpo_args,
-        reward_funcs=[format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness],
+        reward_funcs=reward_funcs,
         train_dataset=train_dataset,
         processing_class=model.tokenizer,
+        training_stage=int(args.stage),
+        corrupt_prob=corrupt_prob,
+        corrupt_latent_noise_std=corrupt_latent_noise_std,
     )
 
     trainer.train()
@@ -415,7 +555,12 @@ def main():
     os.makedirs(lora_dir, exist_ok=True)
     model.model.save_pretrained(lora_dir)
     mm_path = os.path.join(final_dir, "mm_projector.pt")
-    torch.save({"projector": model.projector.state_dict(), "bio_updater": model.bio_updater.state_dict()}, mm_path)
+    to_save = {"projector": model.projector.state_dict(), "bio_updater": model.bio_updater.state_dict()}
+    if hasattr(model, "bio_thinker"):
+        to_save["bio_thinker"] = model.bio_thinker.state_dict()
+    if hasattr(model, "task_thinker"):
+        to_save["task_thinker"] = model.task_thinker.state_dict()
+    torch.save(to_save, mm_path)
     model.tokenizer.save_pretrained(final_dir)
     logger.info(f"Saved LoRA to {lora_dir} and mm weights to {mm_path}")
 

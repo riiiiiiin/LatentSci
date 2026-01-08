@@ -760,6 +760,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         refine_bio_tokens: bool = True,
+        corrupt_task_latents: Optional[torch.Tensor] = None,
+        corrupt_task_latent_noise_std: float = 0.0,
     ):
         """
         Build fused prompt embeddings for generation.
@@ -775,6 +777,19 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         B = input_ids.size(0)
         use_bio_thinker = bool(self.is_both_latent)
         use_coconut = bool(self.is_coconut)
+
+        # Corruption flags are per-sample (B,). When enabled, task latent embeddings are generated normally, then
+        # replaced with "no-information" vectors before answer generation.
+        if corrupt_task_latents is None:
+            corrupt_flags = [False for _ in range(B)]
+        elif isinstance(corrupt_task_latents, torch.Tensor):
+            corrupt_flags = [bool(x) for x in corrupt_task_latents.detach().cpu().tolist()]
+        else:
+            corrupt_flags = [bool(x) for x in corrupt_task_latents]
+        if len(corrupt_flags) != B:
+            raise ValueError(f"corrupt_task_latents length mismatch: got {len(corrupt_flags)} expected {B}")
+
+        self._last_task_latent_counts = [0 for _ in range(B)]
 
         # =========================================================
         # 1. Molecule features: flatten + batch projection
@@ -925,11 +940,13 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         if use_bio_thinker:
             new_samples = []
+            task_latent_counts = []
             for b in range(B):
                 diff = diffs[b]
                 seq = prompt_embeds[b, diff:]  # [L_b, d]
                 if seq.size(0) == 0:
                     new_samples.append(seq)
+                    task_latent_counts.append(0)
                     continue
                 # We appended <start_latent> at the end.
                 base_prefix = seq[:-1].unsqueeze(0)  # [1, L-1, d]
@@ -959,6 +976,26 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 if not ended:
                     latent_block = torch.cat([latent_block, end_latent_emb], dim=1)
 
+                n_task_latents = max(int(latent_block.size(1)) - 2, 0)
+                task_latent_counts.append(n_task_latents)
+
+                if corrupt_flags[b] and latent_block.size(1) > 2:
+                    latent_block = latent_block.clone()
+                    if float(corrupt_task_latent_noise_std) > 0.0:
+                        ids = input_ids[b].to(dtype=torch.int64)
+                        seed_val = int(((ids + 1) * 1315423911).sum().item()) & 0xFFFFFFFFFFFFFFFF
+                        gen = torch.Generator(device=latent_block.device)
+                        gen.manual_seed(seed_val)
+                        noise = torch.randn(
+                            latent_block[:, 1:-1, :].shape,
+                            generator=gen,
+                            device=latent_block.device,
+                            dtype=torch.float32,
+                        ) * float(corrupt_task_latent_noise_std)
+                        latent_block[:, 1:-1, :] = noise.to(dtype=latent_block.dtype)
+                    else:
+                        latent_block[:, 1:-1, :] = torch.zeros_like(latent_block[:, 1:-1, :])
+
                 new_samples.append(torch.cat([base_prefix, latent_block], dim=1).squeeze(0))
 
             max_L = max(s.size(0) for s in new_samples) if new_samples else 0
@@ -971,6 +1008,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 new_prompt_attn_mask[b, diff:] = 1
 
             prompt_embeds, prompt_attn_mask = new_prompt_embeds, new_prompt_attn_mask
+            self._last_task_latent_counts = task_latent_counts
 
         return prompt_embeds, prompt_attn_mask
 

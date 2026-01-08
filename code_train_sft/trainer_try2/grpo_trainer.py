@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import os
 import time
+import hashlib
+import math
+import re
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
@@ -37,6 +40,112 @@ def _normalize_smiles_batch(smiles_batch: list[Any] | None) -> list[list[str]] |
         else:
             out.append(list(item))
     return out
+
+
+_ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
+_PROMPT_EXPECT_RE = re.compile(r"formatted as\s*<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
+_RDKit_LOGS_DISABLED = False
+
+
+def _get_rdkit_chem():
+    global _RDKit_LOGS_DISABLED
+    try:
+        from rdkit import Chem  # type: ignore
+        from rdkit import RDLogger  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise ImportError("RDKit is required for SMILES correctness checks.") from e
+
+    if not _RDKit_LOGS_DISABLED:
+        RDLogger.DisableLog("rdApp.error")
+        RDLogger.DisableLog("rdApp.warning")
+        _RDKit_LOGS_DISABLED = True
+    return Chem
+
+
+def _infer_expected_answer_type(prompt: str) -> str:
+    m = _PROMPT_EXPECT_RE.search(prompt or "")
+    if not m:
+        return "unknown"
+    spec = (m.group(1) or "").strip().lower()
+    if "smiles" in spec:
+        return "smiles"
+    if "yes" in spec and "no" in spec:
+        return "yesno"
+    if "number" in spec:
+        return "number"
+    return "unknown"
+
+
+def _extract_answer_text(completion: str) -> Optional[str]:
+    m = _ANSWER_RE.search(completion or "")
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _is_correct_answer(prompt: str, completion: str, label: str) -> bool:
+    expected = _infer_expected_answer_type(prompt)
+    pred = _extract_answer_text(completion or "")
+    gold = _extract_answer_text(label or "") or (label or "").strip()
+    if pred is None:
+        return False
+
+    pred_clean = pred.strip().strip("\"'`")
+    gold_clean = (gold or "").strip().strip("\"'`")
+
+    if expected == "smiles":
+        Chem = _get_rdkit_chem()
+
+        def canon(s: str) -> Optional[str]:
+            try:
+                mol = Chem.MolFromSmiles(s)  # type: ignore[attr-defined]
+            except Exception:
+                mol = None
+            if mol is None:
+                return None
+            try:
+                return Chem.MolToSmiles(mol, canonical=True)  # type: ignore[attr-defined]
+            except Exception:
+                return None
+
+        pred_can = canon(pred_clean)
+        gold_can = canon(gold_clean)
+        return bool(pred_can is not None and gold_can is not None and pred_can == gold_can)
+
+    if expected == "number":
+        def parse_num(s: str) -> Optional[float]:
+            try:
+                return float(s)
+            except Exception:
+                return None
+
+        pn = parse_num(pred_clean)
+        gn = parse_num(gold_clean)
+        if pn is None or gn is None:
+            return False
+        return bool(math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3))
+
+    if expected == "yesno":
+        def norm_yesno(s: str) -> Optional[str]:
+            s = s.strip().lower()
+            if s in {"yes"}:
+                return "yes"
+            if s in {"no"}:
+                return "no"
+            return None
+
+        py = norm_yesno(pred_clean)
+        gy = norm_yesno(gold_clean)
+        return bool(py is not None and gy is not None and py == gy)
+
+    return bool(pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "")
+
+
+def _stable_hash01(text: str, seed: int, step: int) -> float:
+    payload = f"{seed}:{step}:{text}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    val = int.from_bytes(digest[:8], "little", signed=False)
+    return val / float(2**64)
 
 
 class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
@@ -63,6 +172,9 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         peft_config=None,
         tools=None,
         rollout_func=None,
+        training_stage: int = 3,
+        corrupt_prob: float = 0.0,
+        corrupt_latent_noise_std: float = 0.0,
     ):
         # We implement our own vLLM prompt_embeds path for this multimodal model.
         # TRL's stock vLLM integration generates from token ids and cannot consume `prompt_embeds` built from SMILES.
@@ -119,9 +231,15 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             raise NotImplementedError("Tools/tool-calling is not supported in this molecule GRPO trainer.")
 
         self._current_smiles: list[list[str]] | None = None
+        self._current_corrupt_task_latents: list[bool] | None = None
+        self._current_task_latent_count: list[int] | None = None
         self.llm = None
         self.tp_group = None
         self._last_loaded_step = -1
+
+        self.training_stage = int(training_stage)
+        self.corrupt_prob = float(corrupt_prob)
+        self.corrupt_latent_noise_std = float(corrupt_latent_noise_std)
 
         if self._use_vllm_for_generation:
             self._init_vllm_engine(model=model, args=args)
@@ -283,8 +401,50 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
 
     def _generate_and_score_completions(self, inputs: list[dict[str, Any]]):
         self._current_smiles = self._extract_smiles_from_inputs(inputs)
+        self._current_task_latent_count = None
+
+        if self.training_stage == 4:
+            step = int(getattr(self.state, "global_step", 0) or 0)
+            seed = int(getattr(self.args, "seed", 0) or 0) if self.args is not None else 0
+            flags: list[bool] = []
+            for ex, sm in zip(inputs, self._current_smiles, strict=True):
+                prompt = ex.get("prompt") or ""
+                key = f"{prompt}\n{'.'.join(sm)}"
+                r = _stable_hash01(key, seed=seed, step=step)
+                flags.append(bool(r < float(self.corrupt_prob)))
+            self._current_corrupt_task_latents = flags
+        else:
+            self._current_corrupt_task_latents = None
+
         output = super()._generate_and_score_completions(inputs)
         output["smiles"] = self._current_smiles
+
+        # Stage 4: thread corruption flags + latent counts to loss computation, and mask out corrupted-but-wrong samples.
+        if self.training_stage == 4 and self._current_corrupt_task_latents is not None:
+            device = output["prompt_ids"].device
+            output["corrupt_task_latents"] = torch.tensor(
+                self._current_corrupt_task_latents, device=device, dtype=torch.bool
+            )
+            counts = self._current_task_latent_count or [0 for _ in self._current_corrupt_task_latents]
+            output["task_latent_count"] = torch.tensor(counts, device=device, dtype=torch.long)
+
+            # Mask: keep all uncorrupted samples; for corrupted samples, only keep those that are correct.
+            prompts_text = [ex.get("prompt") or "" for ex in inputs]
+            labels_text = [ex.get("label") or ex.get("labels") or "" for ex in inputs]
+            completions_text = self.processing_class.batch_decode(
+                output["completion_ids"], skip_special_tokens=True
+            )
+            is_correct = [
+                _is_correct_answer(p, c, y)
+                for p, c, y in zip(prompts_text, completions_text, labels_text, strict=True)
+            ]
+            loss_mask = torch.tensor(
+                [((not corr) or ok) for corr, ok in zip(self._current_corrupt_task_latents, is_correct, strict=True)],
+                device=device,
+                dtype=output["completion_mask"].dtype,
+            )
+            output["completion_mask"] = output["completion_mask"] * loss_mask.unsqueeze(1)
+
         return output
 
     def _generate_single_turn(self, prompts: list):
@@ -323,6 +483,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             all_prompt_ids = prompt_ids
             all_prompt_mask = prompt_mask
             all_smiles = smiles
+            all_corrupt = self._current_corrupt_task_latents
             orig_size = len(prompts)
             if self.vllm_tensor_parallel_size > 1:
                 if self.tp_group is None:
@@ -335,6 +496,11 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 gathered_smiles = [None for _ in range(self.vllm_tensor_parallel_size)]
                 torch.distributed.all_gather_object(gathered_smiles, smiles, group=self.tp_group)
                 all_smiles = [s for sub in gathered_smiles for s in sub]
+
+                if self.training_stage == 4:
+                    gathered_corrupt = [None for _ in range(self.vllm_tensor_parallel_size)]
+                    torch.distributed.all_gather_object(gathered_corrupt, self._current_corrupt_task_latents, group=self.tp_group)
+                    all_corrupt = [bool(x) for sub in gathered_corrupt for x in (sub or [])]
 
                 all_prompt_ids = torch.cat(gathered_prompt_ids, dim=0)
                 all_prompt_mask = torch.cat(gathered_prompt_mask, dim=0)
@@ -349,8 +515,11 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                     input_ids=all_prompt_ids,
                     attention_mask=all_prompt_mask,
                     refine_bio_tokens=True,
+                    corrupt_task_latents=all_corrupt,
+                    corrupt_task_latent_noise_std=float(self.corrupt_latent_noise_std),
                 )
             embed_list = [prompt_embeds[i][prompt_attn[i].bool()].contiguous() for i in range(prompt_embeds.size(0))]
+            latent_counts_all = list(getattr(wrapper, "_last_task_latent_counts", []) or [])
 
             from vllm import SamplingParams  # type: ignore
 
@@ -379,12 +548,21 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 local_rank_in_group = torch.distributed.get_rank(group=self.tp_group)
                 tp_slice = slice(local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size)
                 completion_ids_list = all_completion_ids[tp_slice]
+                latent_counts = latent_counts_all[tp_slice] if latent_counts_all else []
             else:
                 completion_ids_list = all_completion_ids
+                latent_counts = latent_counts_all
 
             prompt_ids_list = [p[m].tolist() for p, m in zip(prompt_ids, prompt_mask.bool())]
             logprobs = None
-            extra_fields = {}
+            if self.training_stage == 4:
+                self._current_task_latent_count = [int(x) for x in (latent_counts or [0 for _ in range(orig_size)])]
+                extra_fields = {
+                    "corrupt_task_latents": list(self._current_corrupt_task_latents or [False for _ in range(orig_size)]),
+                    "task_latent_count": list(self._current_task_latent_count),
+                }
+            else:
+                extra_fields = {}
             return prompt_ids_list, completion_ids_list, logprobs, extra_fields
 
         # HF path: prompt_embeds + transformers generate
@@ -408,8 +586,11 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 input_ids=prompt_ids,
                 attention_mask=prompt_mask,
                 refine_bio_tokens=True,
+                corrupt_task_latents=self._current_corrupt_task_latents,
+                corrupt_task_latent_noise_std=float(self.corrupt_latent_noise_std),
             )
             fused_prompt_len = prompt_embeds.size(1)
+            latent_counts = list(getattr(unwrapped_model, "_last_task_latent_counts", []) or [])
 
             out = unwrapped_model.model.generate(
                 inputs_embeds=prompt_embeds,
@@ -443,7 +624,14 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         prompt_ids_list = [p[m].tolist() for p, m in zip(prompt_ids, prompt_mask.bool())]
         completion_ids_list = [c[m].tolist() for c, m in zip(completion_ids, completion_mask.bool())]
         logprobs = None
-        extra_fields = {}
+        if self.training_stage == 4:
+            self._current_task_latent_count = [int(x) for x in (latent_counts or [0 for _ in range(len(prompts))])]
+            extra_fields = {
+                "corrupt_task_latents": list(self._current_corrupt_task_latents or [False for _ in range(len(prompts))]),
+                "task_latent_count": list(self._current_task_latent_count),
+            }
+        else:
+            extra_fields = {}
         return prompt_ids_list, completion_ids_list, logprobs, extra_fields
 
     def _get_per_token_logps_and_entropies(
@@ -484,6 +672,70 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         all_entropies = []
 
         model_to_check = self.accelerator.unwrap_model(model)
+        use_prompt_embeds = bool(getattr(model_to_check, "is_both_latent", False))
+
+        if use_prompt_embeds:
+            if not hasattr(model_to_check, "get_prompt_embeddings"):
+                raise AttributeError(
+                    "Model with is_both_latent=True must implement `get_prompt_embeddings(...)` for GRPO logps."
+                )
+            if not hasattr(model_to_check, "model"):
+                raise AttributeError("Wrapper model is missing `.model` (inner text model).")
+
+            embed = model_to_check.model.get_input_embeddings()
+
+            corrupt_flags = self._current_corrupt_task_latents
+            for start in range(0, input_ids.size(0), batch_size):
+                end = start + batch_size
+                input_ids_batch = input_ids[start:end]
+                attention_mask_batch = attention_mask[start:end]
+                smiles_batch = smiles_to_use[start:end]
+
+                prompt_ids_batch = input_ids_batch[:, :-logits_to_keep]
+                prompt_mask_batch = attention_mask_batch[:, :-logits_to_keep]
+                completion_ids = input_ids_batch[:, -logits_to_keep:]
+                completion_attn = attention_mask_batch[:, -logits_to_keep:]
+
+                corrupt_batch = None
+                if corrupt_flags is not None:
+                    corrupt_batch = corrupt_flags[start:end]
+
+                prompt_embeds, prompt_attn = model_to_check.get_prompt_embeddings(
+                    smiles_list=smiles_batch,
+                    input_ids=prompt_ids_batch,
+                    attention_mask=prompt_mask_batch,
+                    refine_bio_tokens=True,
+                    corrupt_task_latents=corrupt_batch,
+                    corrupt_task_latent_noise_std=float(self.corrupt_latent_noise_std),
+                )
+                completion_embeds = embed(completion_ids).to(dtype=prompt_embeds.dtype)
+                full_embeds = torch.cat([prompt_embeds, completion_embeds], dim=1)
+                full_mask = torch.cat([prompt_attn, completion_attn], dim=1)
+
+                out = model_to_check.model(
+                    inputs_embeds=full_embeds,
+                    attention_mask=full_mask,
+                    return_dict=True,
+                    use_cache=False,
+                )
+                logits_full = out.logits[:, :-1, :]
+                prefix_len = prompt_embeds.size(1)
+                start_pos = max(prefix_len - 1, 0)
+                logits = logits_full[:, start_pos : start_pos + logits_to_keep, :]
+                logits = logits / self.temperature
+
+                logps = selective_log_softmax(logits, completion_ids) * completion_attn.to(torch.float32)
+                all_logps.append(logps)
+
+                if compute_entropy:
+                    with torch.no_grad():
+                        entropies = entropy_from_logits(logits) * completion_attn.to(torch.float32)
+                    all_entropies.append(entropies)
+
+            logps = torch.cat(all_logps, dim=0)
+            entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
+            return logps, entropies
+
         num_queries = int(getattr(model_to_check, "num_queries", 0))
         if num_queries <= 0:
             # Unexpected: fall back to TRL behavior.
@@ -554,4 +806,10 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         # implementation calls it (it doesn't thread `smiles` explicitly).
         if "smiles" in inputs:
             self._current_smiles = inputs["smiles"]
+        if "corrupt_task_latents" in inputs:
+            val = inputs["corrupt_task_latents"]
+            if isinstance(val, torch.Tensor):
+                self._current_corrupt_task_latents = [bool(x) for x in val.detach().cpu().tolist()]
+            else:
+                self._current_corrupt_task_latents = [bool(x) for x in val]
         return super()._compute_loss(model, inputs)
