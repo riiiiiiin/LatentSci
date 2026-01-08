@@ -119,8 +119,11 @@ class MultiModalDataCollator(DataCollatorForSeq2Seq):
     # ... (保持不变) ...
     def __call__(self, features):
         smiles = [f.pop("smiles") for f in features]
+        cot_len = [f.pop("cot_len") for f in features] if features and ("cot_len" in features[0]) else None
         batch = super().__call__(features)
         batch["smiles"] = smiles
+        if cot_len is not None:
+            batch["cot_len"] = torch.tensor(cot_len, dtype=torch.long)
         return batch
 
 # 自定义 SFTTrainer 以支持多模态序列长度变化
@@ -221,6 +224,9 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         if "bio_thinker" in checkpoint and hasattr(model, "bio_thinker"):
             model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
             logger.info("Loaded bio_thinker weights.")
+        if "task_thinker" in checkpoint and hasattr(model, "task_thinker"):
+            model.task_thinker.load_state_dict(checkpoint["task_thinker"])
+            logger.info("Loaded task_thinker weights.")
             
     return model
 
@@ -268,6 +274,18 @@ def train_stage3():
         default=0.5,
         help="Margin alpha for bio-latent cosine hinge loss: mean(max(0, alpha - cos(v, mu))).",
     )
+    parser.add_argument(
+        "--max_cot_string_len",
+        type=int,
+        default=2048,
+        help="Max CoT string length used to scale task-latent count: ceil(len(cot)/max_cot_string_len*4).",
+    )
+    parser.add_argument(
+        "--task_latent_max_steps",
+        type=int,
+        default=10,
+        help="Max loop steps when generating task latents during inference (get_prompt_embeddings).",
+    )
     # Counterfactual bio-token embedding perturbation + loss
     parser.add_argument("--cf_lambda", type=float, default=0.0, help="Weight for counterfactual hinge loss (0 disables).")
     parser.add_argument("--cf_margin", type=float, default=0.5, help="Margin for hinge on (L_cf - L_pos).")
@@ -294,6 +312,8 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        max_cot_string_len = 2048
+        task_latent_max_steps = 10
         include_cot = False
         mode_name = "Stage1-NoCOT"
     elif args.training_stage == 2:
@@ -302,6 +322,8 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        max_cot_string_len = 2048
+        task_latent_max_steps = 10
         include_cot = True
         mode_name = "Stage2-WithCOT"
     else: # Stage 3
@@ -309,6 +331,8 @@ def train_stage3():
         is_both_latent = bool(args.is_both_latent)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
+        max_cot_string_len = int(args.max_cot_string_len)
+        task_latent_max_steps = int(args.task_latent_max_steps)
         include_cot = True
         if is_coconut:
             stages = range(args.max_latent_stage + 1)
@@ -330,9 +354,12 @@ def train_stage3():
         model = Qwen3MoleculeLLM(
             qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
             mol_config=mol_config,
+            is_coconut=is_coconut,
             is_both_latent=is_both_latent,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
+            max_cot_string_len=max_cot_string_len,
+            task_latent_max_steps=task_latent_max_steps,
         )
         tokenizer = model.tokenizer
         
@@ -371,6 +398,9 @@ def train_stage3():
 
         if hasattr(model, "bio_thinker"):
             for param in model.bio_thinker.parameters():
+                param.requires_grad = bool(is_both_latent)
+        if hasattr(model, "task_thinker"):
+            for param in model.task_thinker.parameters():
                 param.requires_grad = bool(is_both_latent)
         
         model.model.train()
@@ -466,6 +496,7 @@ def train_stage3():
             'projector': model.projector.state_dict(),
             'bio_updater': model.bio_updater.state_dict(),
             'bio_thinker': model.bio_thinker.state_dict(),
+            'task_thinker': model.task_thinker.state_dict(),
         }
         torch.save(mm_weights, current_projector_path)
         

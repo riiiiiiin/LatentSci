@@ -199,6 +199,8 @@ def extract_fields(example):
         "label": f"<answer> {label_value} </answer>",
         # 结构化思维链 (CoT)
         "cot": cot_value,
+        # CoT 字符长度（用于动态分配 latent 数量）
+        "cot_len": len(cot_value) if cot_value is not None else 0,
         # 分步思维链 (Coconut 专用)
         "cot_steps": cot_steps,
     }
