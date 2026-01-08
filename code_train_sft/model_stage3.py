@@ -173,6 +173,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                  mol_config,       # 🚨 必须传入配置字典
                  device_map=None,
                  is_both_latent: bool = False,
+                 bio_latent_lambda: float = 0.0,
+                 bio_latent_alpha: float = 0.5,
                  torch_dtype=torch.bfloat16):
         """
         分子-文本多模态大语言模型
@@ -193,6 +195,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.smi_ted_folder = mol_config.get('smi_ted_folder', ModelConfig.DEFAULT_SMI_TED_FOLDER)
         self.smi_ted_ckpt = mol_config.get('smi_ted_ckpt', ModelConfig.DEFAULT_SMI_TED_CKPT)
         self.is_both_latent = bool(is_both_latent)
+        self.bio_latent_lambda = float(bio_latent_lambda)
+        self.bio_latent_alpha = float(bio_latent_alpha)
 
         # ---- 1. 加载预训练的Qwen LLM ----
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
@@ -409,6 +413,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         smiles_list = kwargs.pop("smiles", None)
         do_perturb = kwargs.pop("do_perturb", False) # 是否执行逆向干扰 (Counterfactual perturbation)
         use_bio_thinker = bool(kwargs.pop("is_both_latent", self.is_both_latent))
+        bio_latent_lambda = float(kwargs.pop("bio_latent_lambda", self.bio_latent_lambda))
+        bio_latent_alpha = float(kwargs.pop("bio_latent_alpha", self.bio_latent_alpha))
 
         if smiles_list is None:
             raise ValueError("必须提供smiles参数")
@@ -467,6 +473,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         fused_labels_list = []
         bio_positions_list = [] # Stage 3: 记录每个 sample 中 bio token 的索引
         bio_latent_positions_list = []  # 记录每个 sample 的 bio latent token 索引（绝对位置）
+        bio_latent_targets_list = []    # 每个 sample 的 v targets（长度 = #smiles），不参与梯度
         cursor = 0
 
         for b in range(B):
@@ -474,9 +481,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             sample_mol_parts = []
             b_bio_indices = []
             current_mol_offset = 0
+            b_targets = []
 
             for _ in range(mol_counts[b]):
                 m_feat = flat_feats_llm[cursor].unsqueeze(0) # [1, num_queries, d_llm]
+                # v: mean pooling of bio tokens (pre-concat), used as detached supervision target
+                b_targets.append(m_feat.mean(dim=1).squeeze(0).detach())
                 
                 # --- Stage 3: Counterfactual Bio Latent Dropout ---
                 if self.training and do_perturb:
@@ -502,6 +512,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 cursor += 1
             
             bio_positions_list.append(b_bio_indices)
+            bio_latent_targets_list.append(b_targets)
             mol_part = torch.cat(sample_mol_parts, dim=1) if sample_mol_parts else torch.zeros(1, 0, self.d_llm, device=device, dtype=self.model.dtype)
 
             # 2.2 提取真实文本内容 (通过 Mask 提取非 Padding 部分)
@@ -586,8 +597,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         
         if not has_latent:
             # --- 标准 SFT 路径 ---
+            model_input_embeds = final_embeds
             outputs = self.model(
-                inputs_embeds=final_embeds,
+                inputs_embeds=model_input_embeds,
                 attention_mask=final_attn_mask,
                 labels=final_labels,
                 past_key_values=past_key_values,
@@ -616,8 +628,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             )
             
             # 最终计算 Loss
+            model_input_embeds = final_embeds_with_thoughts
             outputs = self.model(
-                inputs_embeds=final_embeds_with_thoughts,
+                inputs_embeds=model_input_embeds,
                 attention_mask=final_attn_mask,
                 labels=final_labels,
                 output_attentions=output_attentions,
@@ -625,8 +638,35 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 return_dict=True,
             )
 
+        # =========================================================
+        # 5. Bio latent alignment loss (optional)
+        # Loss = avg_i max(0, alpha - cos(v_i, mu_i)), where v_i is detached.
+        # =========================================================
+        total_loss = outputs.loss
+        if use_bio_thinker and bio_latent_lambda > 0.0 and any(bio_latent_positions_list):
+            sample_losses = []
+            for b in range(B):
+                positions = bio_latent_positions_list[b]
+                if not positions:
+                    continue
+                targets = bio_latent_targets_list[b]
+                if len(targets) != len(positions):
+                    raise ValueError(
+                        f"bio_latent target/position mismatch: targets={len(targets)} positions={len(positions)}"
+                    )
+                mu = model_input_embeds[b, positions].float()
+                v = torch.stack(targets, dim=0).to(device=mu.device).float().detach()
+                cos_sim = F.cosine_similarity(v, mu, dim=-1)
+                alpha = mu.new_tensor(bio_latent_alpha)
+                sample_losses.append(F.relu(alpha - cos_sim).mean())
+
+            if sample_losses:
+                bio_latent_loss = torch.stack(sample_losses).mean()
+                scaled = bio_latent_lambda * bio_latent_loss
+                total_loss = total_loss + scaled.to(dtype=total_loss.dtype)
+
         return CausalLMOutputWithPast(
-            loss=outputs.loss,
+            loss=total_loss,
             logits=outputs.logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

@@ -256,6 +256,18 @@ def train_stage3():
         default=False,
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
     )
+    parser.add_argument(
+        "--bio_latent_lambda",
+        type=float,
+        default=0.0,
+        help="Weight for bio-latent cosine hinge loss (only effective when --training_stage 3 and --is_both_latent true).",
+    )
+    parser.add_argument(
+        "--bio_latent_alpha",
+        type=float,
+        default=0.5,
+        help="Margin alpha for bio-latent cosine hinge loss: mean(max(0, alpha - cos(v, mu))).",
+    )
     # Counterfactual bio-token embedding perturbation + loss
     parser.add_argument("--cf_lambda", type=float, default=0.0, help="Weight for counterfactual hinge loss (0 disables).")
     parser.add_argument("--cf_margin", type=float, default=0.5, help="Margin for hinge on (L_cf - L_pos).")
@@ -280,17 +292,23 @@ def train_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        bio_latent_lambda = 0.0
+        bio_latent_alpha = 0.5
         include_cot = False
         mode_name = "Stage1-NoCOT"
     elif args.training_stage == 2:
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        bio_latent_lambda = 0.0
+        bio_latent_alpha = 0.5
         include_cot = True
         mode_name = "Stage2-WithCOT"
     else: # Stage 3
         is_coconut = bool(args.is_coconut)
         is_both_latent = bool(args.is_both_latent)
+        bio_latent_lambda = float(args.bio_latent_lambda)
+        bio_latent_alpha = float(args.bio_latent_alpha)
         include_cot = True
         if is_coconut:
             stages = range(args.max_latent_stage + 1)
@@ -313,6 +331,8 @@ def train_stage3():
             qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
             mol_config=mol_config,
             is_both_latent=is_both_latent,
+            bio_latent_lambda=bio_latent_lambda,
+            bio_latent_alpha=bio_latent_alpha,
         )
         tokenizer = model.tokenizer
         
