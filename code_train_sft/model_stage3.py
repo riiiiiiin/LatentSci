@@ -756,7 +756,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             attentions=outputs.attentions,
         )
 
-    @torch.no_grad()
     def get_prompt_embeddings(
         self,
         smiles_list: List[List[str]],
@@ -795,10 +794,14 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self._last_task_latent_counts = [0 for _ in range(B)]
         refine_bio_tokens = True
 
+        # NOTE: This function is used both for generation (call under `torch.no_grad()` / `torch.inference_mode()`)
+        # and for GRPO log-prob computation (needs gradients for projector/bio_updater/bio_thinker/task_thinker).
+
         # =========================================================
         # 1. Molecule features: flatten + batch projection
         # =========================================================
-        mol_emb_nested = self.mol_encoder.encode(smiles_list)
+        with torch.no_grad():
+            mol_emb_nested = self.mol_encoder.encode(smiles_list)
 
         flat_mols = []
         mol_counts = []
@@ -962,13 +965,16 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 for _ in range(int(self.task_latent_max_steps)):
                     full_seq = torch.cat([base_prefix, latent_block], dim=1)
                     full_mask = torch.ones(1, full_seq.size(1), device=device, dtype=torch.long)
-                    out = self.model(
-                        inputs_embeds=full_seq,
-                        attention_mask=full_mask,
-                        output_hidden_states=True,
-                        return_dict=True,
-                        use_cache=False,
-                    )
+                    # Task-latent token *sampling* does not need gradients; gradients are provided by the later GRPO
+                    # log-prob forward on the full (prompt + completion) sequence.
+                    with torch.no_grad():
+                        out = self.model(
+                            inputs_embeds=full_seq,
+                            attention_mask=full_mask,
+                            output_hidden_states=True,
+                            return_dict=True,
+                            use_cache=False,
+                        )
                     next_id = int(out.logits[:, -1, :].argmax(dim=-1).item())
                     if next_id == int(self.end_latent_id):
                         latent_block = torch.cat([latent_block, end_latent_emb], dim=1)

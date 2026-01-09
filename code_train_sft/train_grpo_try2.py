@@ -42,6 +42,16 @@ def _ensure_lora_and_trainables(model: Qwen3MoleculeLLM):
         )
         model.model = get_peft_model(model.model, lora_config)
 
+    # IMPORTANT: we froze everything above, which also freezes LoRA params loaded from checkpoint.
+    # GRPO needs the policy parameters (LoRA adapters) to require grad; otherwise loss will be detached.
+    lora_param_count = 0
+    for name, p in model.model.named_parameters():
+        if "lora_" in name or "modules_to_save" in name:
+            p.requires_grad = True
+            lora_param_count += p.numel()
+    if lora_param_count == 0:
+        logger.warning("No LoRA parameters were marked trainable; GRPO may fail (detached loss).")
+
     # Multimodal heads trainable
     for p in model.projector.parameters():
         p.requires_grad = True
