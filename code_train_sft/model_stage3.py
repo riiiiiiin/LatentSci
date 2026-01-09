@@ -407,7 +407,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     
                     # 5. 将更新后的结果写回 (Scatter back)
                     for i, b in enumerate(active_indices):
-                        new_embeds[b, bio_positions[b]] = refined[i, :len(bio_positions[b])]
+                        new_embeds[b, bio_positions[b]] = refined[i, : len(bio_positions[b])].to(dtype=new_embeds.dtype)
 
             # --- Standard Coconut Feedback ---
             # 识别当前 Pass 需要更新 latent feedback 的 Batch 索引
@@ -420,11 +420,13 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     f_b_idx = torch.tensor(feedback_indices, device=device)[valid_mask]
                     f_p_idx = pos_indices[valid_mask]
                     # 批量注入：将前一个位置的输出作为当前位置的输入
-                    new_embeds[f_b_idx, f_p_idx] = hidden_states[f_b_idx, f_p_idx - 1]
+                    new_embeds[f_b_idx, f_p_idx] = hidden_states[f_b_idx, f_p_idx - 1].to(dtype=new_embeds.dtype)
 
                     # --- TaskThinker refinement (optional, used for task-latent generation) ---
                     if apply_task_thinker and task_thinker is not None:
-                        new_embeds[f_b_idx, f_p_idx] = task_thinker(new_embeds[f_b_idx, f_p_idx])
+                        new_embeds[f_b_idx, f_p_idx] = task_thinker(new_embeds[f_b_idx, f_p_idx]).to(
+                            dtype=new_embeds.dtype
+                        )
 
             curr_embeds = new_embeds
             
@@ -669,7 +671,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             for b in range(B):
                 positions = bio_latent_positions_list[b]
                 if positions:
-                    final_embeds[b, positions] = thinker_out[b, positions]
+                    final_embeds[b, positions] = thinker_out[b, positions].to(dtype=final_embeds.dtype)
 
         # =========================================================
         # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
@@ -910,7 +912,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 positions = bio_latent_positions_list[b]
                 if positions:
                     shifted = [p + diffs[b] for p in positions]
-                    prompt_embeds[b, shifted] = thinker_out[b, shifted]
+                    prompt_embeds[b, shifted] = thinker_out[b, shifted].to(dtype=prompt_embeds.dtype)
 
         # =========================================================
         # 4. Coconut latent-feedback refinement (optional based on presence of <latent>)
