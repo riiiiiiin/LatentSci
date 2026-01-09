@@ -163,15 +163,16 @@ def run_inference_on_dataset(
         padded_attention_mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
         padded_attention_mask = padded_attention_mask.to(device).long()
         
-        generated_ids = model.generate(
-            smiles_list=smiles_batch,
-            input_ids=padded_input_ids,
-            attention_mask=padded_attention_mask,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=True if temperature > 0 else False,
-        )
+        with torch.inference_mode():
+            generated_ids = model.generate(
+                smiles_list=smiles_batch,
+                input_ids=padded_input_ids,
+                attention_mask=padded_attention_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True if temperature > 0 else False,
+            )
         
         try:
             del padded_input_ids
@@ -181,6 +182,7 @@ def run_inference_on_dataset(
         except:
             pass
         
+        generated_ids = generated_ids.cpu()
         if isinstance(generated_ids, torch.Tensor):
             gen_tensor = generated_ids
         else:
@@ -190,7 +192,7 @@ def run_inference_on_dataset(
         if gen_tensor.size(0) != batch_size:
             raise Exception(f"Generated tensor batch size ({gen_tensor.size(0)}) != expected ({batch_size}).")
         
-        gen_tensor_cpu = gen_tensor.cpu().tolist()
+        gen_tensor_cpu = gen_tensor.tolist()
         decoded_list = tokenizer.batch_decode(gen_tensor_cpu, skip_special_tokens=True)
         for decoded in decoded_list:
             generation_outputs.append({"result": decoded.strip()})
