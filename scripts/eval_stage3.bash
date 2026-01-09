@@ -11,7 +11,7 @@ CUDA_DEVICES=0,1
 # =========================
 # inference config
 # =========================
-BATCH_SIZE=32
+BATCH_SIZE=4
 MAX_NEW_TOKENS=2048
 TEMPERATURE=0.7
 TOP_P=0.9
