@@ -1,5 +1,5 @@
 # ============================
-# Part 1. Dataset loading & preprocessing
+# Part 1. Dataset loading & preprocessing (with eval mode)
 # ============================
 
 import json
@@ -40,76 +40,80 @@ MAX_LEN = ModelConfig.MAX_TEXT_LEN
 # --------------------------------
 # 1. 从原始数据中抽取关键信息
 # --------------------------------
-def extract_fields(example):
+def extract_fields(example, is_eval: bool = False):
     """
     从原始 ChemCot 数据中提取：
     - query: 作为 prompt
     - input_smiles: 分子 SMILES（用于多模态分子编码器）
     - label: 作为 LLM 的监督答案
 
-    label 优先级：
-        gt > reference > struct_cot 中解析出的 output
+    当 is_eval=True 时，label / cot / cot_steps 将被置为 None（例如用于推理/评估）。
     """
+    
     # meta 字段是一个 JSON 字符串，需要先解析
     meta_dict = json.loads(example["meta"])
+    task = example['subtask']
 
     # 2. 解析 struct_cot
-    # 第一步：初次解析，处理可能的 JSON 转义
-    try:
-        cot_content = json.loads(example["struct_cot"], object_pairs_hook=OrderedDict)
-    except json.JSONDecodeError as e:
-        print(f"\n[CRITICAL DATA ERROR] JSON is malformed in example ID: {example.get('id')}")
-        print(f"[ERROR DETAILS]: {e}")
-        print(f"[RAW CONTENT]: {repr(example.get('struct_cot'))}")
-        raise  # 依然抛出错误，中断训练
-    
-    # 第二步：如果解析出来是带 Markdown 标签的字符串，则剥离标签并进行二次解析
-    if isinstance(cot_content, str):
-        cleaned = cot_content.strip()
-        if cleaned.startswith("```json"):
-            # 移除开头的 ```json 和结尾的 ```
-            cleaned = cleaned[7:-3].strip()
-        # 二次解析，如果格式不对这里会直接报错
+    # 如果 struct_cot 是不可解析的 JSON 会抛出错误并让上层决定
+    if is_eval:
+        cot_dict = {}
+    else:
         try:
-            cot_dict = json.loads(cleaned, object_pairs_hook=OrderedDict)
+            cot_content = json.loads(example["struct_cot"], object_pairs_hook=OrderedDict)
         except json.JSONDecodeError as e:
-            print(f"\n[CRITICAL DATA ERROR] Secondary JSON parsing failed for example ID: {example.get('id')}")
+            print(f"\n[CRITICAL DATA ERROR] JSON is malformed in example ID: {example.get('id')}")
             print(f"[ERROR DETAILS]: {e}")
-            print(f"[CLEANED CONTENT]: {repr(cleaned)}")
+            print(f"[RAW CONTENT]: {repr(example.get('struct_cot'))}")
             raise
-    else:
-        cot_dict = cot_content
-    
-    # 3. 构造 CoT 步骤列表 (Coconut 专用)
-    # 每个步骤是一个字符串，例如 "Step 1:\nSMILES: CCC"
-    cot_steps = []
-    for i, (k, v) in enumerate(cot_dict.items()):
-        if k == "output": continue # output 另外处理
-        cot_steps.append(f"Step {i+1}:\n{k}: {v}")
-    
-    # 为了兼容旧版 SFT，依然保留 cot_value 字符串
-    cot_value = "\n\n".join(cot_steps)
 
-    # 4. 提取 label 优先级
-    if meta_dict.get("gt"):
-        label_value = str(meta_dict["gt"])
-    elif meta_dict.get("reference"):
-        label_value = str(meta_dict["reference"])
-    else:
-        label_value = str(cot_dict["output"])
+        if isinstance(cot_content, str):
+            cleaned = cot_content.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:-3].strip()
+            try:
+                cot_dict = json.loads(cleaned, object_pairs_hook=OrderedDict)
+            except json.JSONDecodeError as e:
+                print(f"\n[CRITICAL DATA ERROR] Secondary JSON parsing failed for example ID: {example.get('id')}")
+                print(f"[ERROR DETAILS]: {e}")
+                print(f"[CLEANED CONTENT]: {repr(cleaned)}")
+                raise
+        else:
+            cot_dict = cot_content
+
+        # 3. 构造 CoT 步骤列表 (Coconut 专用)
+        # 每个步骤是一个字符串，例如 "Step 1:\nSMILES: CCC"
+        cot_steps = []
+        for i, (k, v) in enumerate(cot_dict.items()):
+            if k == "output":
+                continue
+            cot_steps.append(f"Step {i+1}:\n{k}: {v}")
+
+        cot_value = "\n\n".join(cot_steps)
+
+        # 4. 提取 label 优先级
+        if meta_dict.get("gt"):
+            label_value = str(meta_dict["gt"])
+        elif meta_dict.get("reference"):
+            label_value = str(meta_dict["reference"])
+        else:
+            label_value = str(cot_dict.get("output", ""))
 
     # 提取 SMILES
     raw_val = meta_dict.get("molecule")
     if raw_val is None:
-        raw_val = meta_dict.get("reactants")
-    
-    # 统一转为列表处理
+        reactants = meta_dict.get("reactants", [])
+        reagents = meta_dict.get("reagents", [])
+        products = meta_dict.get("products", [])
+        raw_val = reactants + reagents + products
+
     if isinstance(raw_val, str):
         val_list = [raw_val]
     elif isinstance(raw_val, list):
         val_list = raw_val
     else:
         val_list = []
+        print(example['id'])
         
     # 按 '.' 切分并处理末尾点的情况，同时保持顺序
     input_smiles = []
@@ -127,7 +131,7 @@ def extract_fields(example):
     # --------------------------------
     # 替换特定的 JSON 格式要求为 <answer> 格式
     # --------------------------------
-    if query:
+    if query and not is_eval:
         # 1. 删除无意义的说明句子
         junk_patterns = [
             r'Do not provide any additional information beyond the requested SMILES strings\.?',
@@ -186,9 +190,17 @@ def extract_fields(example):
                 # 使用 lambda 替换，避免 re.sub 对 SMILES 中反斜杠 (\) 的错误转义
                 replacement = f"{s} (the {i+1}-th SMILES)"
                 query = re.sub(pattern, lambda m: replacement, query)
-            else:
-                # print(f"SMILES not found in query: {s}")
-                pass
+
+    # 如果是 eval 模式，将这些监督/中间字段设为 None
+    if is_eval:
+        return {
+            "query": query,
+            "input_smiles": input_smiles,
+            "label": None,
+            "cot": None,
+            "cot_steps": None,
+            "task": task
+        }
 
     return {
         # LLM 输入的文本 prompt
@@ -203,6 +215,7 @@ def extract_fields(example):
         "cot_len": len(cot_value) if cot_value is not None else 0,
         # 分步思维链 (Coconut 专用)
         "cot_steps": cot_steps,
+        "task": task
     }
 
 
@@ -210,20 +223,33 @@ def extract_fields(example):
 # 2.5 构造 Coconut 训练样本
 # --------------------------------
 def coconut_tokenize(
-    example, 
-    scheduled_stage=0, 
-    c_thought=2, 
-    max_len=ModelConfig.MAX_TEXT_LEN
+    example,
+    scheduled_stage=0,
+    c_thought=2,
+    max_len=ModelConfig.MAX_TEXT_LEN,
+    is_eval: bool = False,
 ):
     """
-    Coconut 训练的核心数据处理：
-    将前 scheduled_stage 个步骤替换为 (scheduled_stage * c_thought) 个 <latent> tokens。
+    Coconut 训练的核心数据处理。
+
+    当 is_eval=True 时，只返回 prompt 的 tokenized 结果，并把 labels 设为 None（用于评估/推理）。
     """
-    prompt = example["query"]
-    steps = example["cot_steps"]
-    label = example["label"]
-    
-    # 确定要替换的步数（不能超过总步数）
+    prompt = example.get("query", "")
+    steps = example.get("cot_steps") or []
+    label = example.get("label")
+
+    # Eval 模式：只 token 化 prompt
+    if is_eval or (label is None and not steps):
+        prompt_ids = tokenizer.encode(f"{prompt}\n\n", add_special_tokens=False)
+        input_ids = prompt_ids[:max_len]
+        attention_mask = [1] * len(input_ids)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": None,
+            "smiles": example.get("input_smiles"),
+        }
+
     n_skip_steps = min(len(steps), scheduled_stage)
     n_latent_tokens = n_skip_steps * c_thought
     
@@ -260,22 +286,35 @@ def coconut_tokenize(
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "smiles": example["input_smiles"],
+        "smiles": example.get("input_smiles"),
     }
 
 
 # --------------------------------
 # 2. 构造 Causal LM 的训练样本 (旧版 SFT 兼容)
 # --------------------------------
-def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
+def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is_eval: bool = False):
     """
-    构造 Causal Language Model 的训练格式：
-    使用分别 Tokenize 再拼接的方法，确保 Label 对齐绝对精确。
+    构造 Causal Language Model 的训练格式。
+
+    当 is_eval=True 或 label 为 None 时，仅 token 化 prompt，并将 labels 设为 None。
     """
 
-    prompt = example["query"]
-    cot = example.get("cot", "")
-    label = example["label"]
+    prompt = example.get("query", "")
+    cot = example.get("cot") or ""
+    label = example.get("label")
+
+    if is_eval or (label is None):
+        # 仅 prompt
+        prompt_enc = tokenizer(f"{prompt}\n\n", truncation=True, padding=False, max_length=max_len, add_special_tokens=False)
+        input_ids = prompt_enc["input_ids"][:max_len]
+        attention_mask = prompt_enc["attention_mask"][:max_len]
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": None,
+            "smiles": example.get("input_smiles"),
+        }
 
     # 根据参数决定是否包含 CoT
     if include_cot and cot:
@@ -322,12 +361,12 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN):
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "smiles": example["input_smiles"],  # Fixed: changed from example["smiles"] to example["input_smiles"]
+        "smiles": example.get("input_smiles"),
     }
 
 
 # --------------------------------
-# 3. 数据集加载与整体处理流程
+# 3. 数据集加载与整体处理流程（支持 eval_mode）
 # --------------------------------
 def load_data(
     path, 
@@ -335,25 +374,24 @@ def load_data(
     max_len=ModelConfig.MAX_TEXT_LEN,
     is_coconut=False,
     scheduled_stage=0,
-    c_thought=2
+    c_thought=2,
+    exclude_tasks=['rcr'],
+    eval_mode: bool = False,
 ):
     """
-    完整的数据加载流程：
-    1. 加载原始 ChemCot 数据集
-    2. 提取 query / smiles / label / steps
-    3. 将文本转为 LLM 可训练的 token 格式 (支持 SFT 或 Coconut)
+    完整的数据加载流程，新增参数 eval_mode：
+      - eval_mode=False（默认）：训练/微调用，有 label 和 cot 信息
+      - eval_mode=True：评估/推理用，label/cot/cot_steps 被置为 None，tokenize 时不会产生 labels
     """
-
-    # 扫描所有 JSON 文件并排除 rxn/rcr.json
     all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
-    data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
-    
-    # print(f"Loading {len(data_files)} JSON files...")
-    
-    # 加载过滤后的数据文件
+
+    def filter_data(f):
+        return all([not f.endswith(f"{task}.json") for task in exclude_tasks])
+
+    data_files = [f for f in all_json_files if filter_data(f)]
+
     ds = load_dataset("json", data_files=data_files)["train"]
 
-    # 过滤已知损坏的数据 ID
     bad_ids = [
         "f7e567a6-47de-4c77-8c1f-9049689322e8",
         "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
@@ -361,37 +399,33 @@ def load_data(
     ]
     ds = ds.filter(lambda x: x["id"] not in bad_ids)
 
-    # --------------------------------
-    # Step 1: 提取结构化字段
-    # --------------------------------
+    # Step 1: 提取结构化字段（支持 eval 模式）
     dataset = ds.map(
         extract_fields,
         batched=False,
+        fn_kwargs={"is_eval": eval_mode},
         remove_columns=ds.column_names
     )
 
-    # --------------------------------
-    # Step 2: 构造训练样本
-    # --------------------------------
+    # Step 2: 构造训练/评估样本
     if is_coconut:
-        # Coconut 模式
         dataset = dataset.map(
             coconut_tokenize,
             batched=False,
             fn_kwargs={
-                "scheduled_stage": scheduled_stage, 
-                "c_thought": c_thought, 
-                "max_len": max_len
+                "scheduled_stage": scheduled_stage,
+                "c_thought": c_thought,
+                "max_len": max_len,
+                "is_eval": eval_mode,
             },
             remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
         )
     else:
-        # 标准 SFT 模式
         dataset = dataset.map(
             llm_tokenize,
             batched=False,
-                fn_kwargs={"include_cot": include_cot, "max_len": max_len},
-                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+            fn_kwargs={"include_cot": include_cot, "max_len": max_len, "is_eval": eval_mode},
+            remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
         )
 
     return dataset
@@ -441,42 +475,13 @@ def load_grpo_data(path):
 # 4. 运行示例与测试
 # --------------------------------
 if __name__ == "__main__":
-    # 测试路径
-    DATA_ROOT = "/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot"
-    
-    # 获取所有 JSON 文件
-    all_json_files = glob.glob(os.path.join(DATA_ROOT, "**/*.json"), recursive=True)
-    test_files = [f for f in all_json_files if not f.endswith("rcr.json")]
-    
-    print(f"\n{'='*20} Testing Query Replacement {'='*20}")
-    
-    for f_path in sorted(test_files):
-        rel_path = os.path.relpath(f_path, DATA_ROOT)
-        try:
-            with open(f_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if not data:
-                continue
-            
-            # 如果是 fs_by_product.json，测试前 15 条，否则测试第 1 条
-            num_to_test = 15 if "fs_by_product.json" in rel_path else 1
-            
-            print(f"\n{'#'*10} [FILE]: {rel_path} (Testing {num_to_test} samples) {'#'*10}")
-            
-            for i in range(min(len(data), num_to_test)):
-                example = data[i]
-                processed = extract_fields(example)
-                
-                print(f"\n--- Sample {i+1} ---")
-                for key, val in processed.items():
-                    print(f"[{key.upper()}]:\n{val}\n")
-            
-            print(f"\n{'='*60}")
-            
-        except Exception as e:
-            print(f"Error processing {rel_path}: {e}")
+    # DATA_ROOT = "/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot"
 
-    # 也可以保留原有的全量加载测试（可选）
-    # dataset = load_data(DATA_ROOT)
-    # print(f"\nTotal samples loaded: {len(dataset)}")
+    # # 示例：训练集加载（含 labels）
+    # ds_train = load_data(DATA_ROOT, include_cot=True, is_coconut=False, eval_mode=False)
+    # print(f"Train samples example: {ds_train[0]}")
+
+    EVAL_DATA = '../data/ChemCoTBench'
+    # 示例：eval 集合加载（label/cot/cot_steps 为 None，tokenize 时不会产生 labels）
+    ds_eval = load_data(EVAL_DATA, include_cot=False, is_coconut=False, eval_mode=True, exclude_tasks=['rcr', 'mechsel'])
+    print(f"Eval samples example: {ds_eval[0]}")
