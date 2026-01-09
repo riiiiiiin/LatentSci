@@ -161,7 +161,7 @@ def run_inference_on_dataset(
         padded_input_ids = pad_sequence(input_tensors, batch_first=True, padding_value=pad_token_id).to(device)
         max_len = padded_input_ids.size(1)
         padded_attention_mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
-        padded_attention_mask = padded_attention_mask.long()
+        padded_attention_mask = padded_attention_mask.to(device).long()
         
         generated_ids = model.generate(
             smiles_list=smiles_batch,
@@ -172,6 +172,14 @@ def run_inference_on_dataset(
             top_p=top_p,
             do_sample=True if temperature > 0 else False,
         )
+        
+        try:
+            del padded_input_ids
+            del padded_attention_mask
+            del input_tensors
+            del lengths
+        except:
+            pass
         
         if isinstance(generated_ids, torch.Tensor):
             gen_tensor = generated_ids
@@ -186,6 +194,13 @@ def run_inference_on_dataset(
         decoded_list = tokenizer.batch_decode(gen_tensor_cpu, skip_special_tokens=True)
         for decoded in decoded_list:
             generation_outputs.append({"result": decoded.strip()})
+        
+        try: 
+            del gen_tensor
+            del gen_tensor_cpu
+            del generated_ids
+        except:
+            pass
 
     return generation_outputs
 
@@ -412,7 +427,7 @@ def inference_stage3():
         save_inference_results(
             save_results_path=args.inference_results_path,
             per_sample_metadata=per_sample_metadata,
-            generation_outpus=results,
+            generation_outputs=results,
             model=model,
             test_data_path=args.data_path,
             generation_config={
