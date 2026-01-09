@@ -431,3 +431,6 @@ def inference_stage3():
         torch.cuda.empty_cache()
 
     logger.info(f"🎉 All {mode_name} inference Stages completed!")
+    
+if __name__ == "__main__":
+    inference_stage3()

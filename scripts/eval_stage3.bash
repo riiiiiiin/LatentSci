@@ -161,9 +161,34 @@ done
 
 echo "$(date +'%Y-%m-%d %H:%M:%S') - All stage-3 inference processes finished successfully." | tee -a "${LOG_FILE}"
 
-echo "============================================="
+# cd and eval
+if [[ ! -d "eval" ]]; then
+  echo "ERROR: eval dir not found." | tee -a "${LOG_FILE}"
+  exit 12
+fi
+
+EVAL_CMD=(
+  "${PYTHON_BIN}" "eval/eval_results.py"
+  --result_path "${RESULT_PATH}"
+  --log_name "${LOG_NAME}"
+)
+
+echo "Running evaluation command:" | tee -a "../${LOG_FILE}"
+printf " %s " "${EVAL_CMD[@]}" | tee -a "../${LOG_FILE}"
+echo "" | tee -a "../${LOG_FILE}"
+
+if "${EVAL_CMD[@]}" 2>&1 | tee -a "../${LOG_FILE}"; then
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Evaluation finished successfully." | tee -a "../${LOG_FILE}"
+else
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: Evaluation failed. See log: ${LOG_FILE}" | tee -a "../${LOG_FILE}"
+  popd > /dev/null
+  exit 20
+fi
+
+popd > /dev/null
+
 echo "All done."
-echo "Per-proc results in: ${OUTPUT_DIR}/results/"
-echo "Final merged target (if any): ${INFERENCE_RESULTS_PATH}"
-echo "Log file: ${LOG_FILE}"
-echo "============================================="
+echo "Inference results: ${INFERENCE_RESULTS_PATH}"
+echo "Eval log name: ${LOG_NAME}"
+echo "Full log: ${LOG_FILE}"
+echo "====================================================="
