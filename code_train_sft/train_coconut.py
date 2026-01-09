@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import inspect
 from transformers import AutoTokenizer, TrainingArguments, TrainerCallback
 from trl import SFTConfig, SFTTrainer
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
@@ -33,6 +34,7 @@ def train_coconut():
     parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_seq_length", type=int, default=8192)
+    parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
     
     args = parser.parse_args()
 
@@ -98,27 +100,34 @@ def train_coconut():
         # 2.3 配置当前 Stage 的输出目录
         stage_output_dir = os.path.join(args.output_dir, f"coconut_{stage}")
         
-        training_args = SFTConfig(
-            output_dir=stage_output_dir,
-            num_train_epochs=args.epochs_per_stage, # 每个阶段练固定 Epoch
-            per_device_train_batch_size=args.batch_size,
-            gradient_accumulation_steps=args.grad_accum,
-            learning_rate=args.lr,
-            bf16=True,
-            max_seq_length=args.max_seq_length,
-            remove_unused_columns=False,
-            logging_steps=10,
-            save_strategy="no", # 🚨 不保存中间检查点，节省空间
-            save_total_limit=1,
-            gradient_checkpointing=True,
-            # 🚨 修复 DDP 错误：使用非重入式 checkpoint 并允许查找未使用参数
-            gradient_checkpointing_kwargs={"use_reentrant": False},
-            ddp_find_unused_parameters=True,
-            report_to="wandb",
-            optim="adamw_8bit",
-            lr_scheduler_type="cosine",
-            weight_decay=0.01,
-        )
+        # 兼容不同版本的 TRL (0.15 vs 0.24+)
+        sft_config_kwargs = {
+            "output_dir": stage_output_dir,
+            "num_train_epochs": args.epochs_per_stage,
+            "per_device_train_batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.grad_accum,
+            "learning_rate": args.lr,
+            "bf16": True,
+            "remove_unused_columns": False,
+            "logging_steps": 10,
+            "save_strategy": "no",
+            "save_total_limit": 1,
+            "gradient_checkpointing": True,
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+            "ddp_find_unused_parameters": True,
+            "report_to": "wandb",
+            "optim": "adamw_8bit",
+            "lr_scheduler_type": "cosine",
+            "weight_decay": 0.01,
+        }
+        
+        # 检查 SFTConfig 支持哪个参数名 (max_seq_length 还是 max_length)
+        if "max_seq_length" in inspect.signature(SFTConfig.__init__).parameters:
+            sft_config_kwargs["max_seq_length"] = args.max_seq_length
+        else:
+            sft_config_kwargs["max_length"] = args.max_seq_length
+
+        training_args = SFTConfig(**sft_config_kwargs)
 
         # WandB 记录
         if wandb.run is not None:
@@ -137,7 +146,7 @@ def train_coconut():
             model=model,
             args=training_args,
             train_dataset=train_dataset,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             data_collator=data_collator,
             callbacks=[LoraTrainingMonitorCallback(), TerminalPlotCallback()],
         )
@@ -146,13 +155,22 @@ def train_coconut():
         trainer.train()
         
         # 2.4 保存当前阶段结果，并更新下个阶段的加载路径
-        trainer.save_model(stage_output_dir)
+        if args.save_full_model:
+            logger.info("Saving full model weights for stage %d...", stage)
+            trainer.save_model(stage_output_dir)
+        else:
+            logger.info("Skipping full model weights saving for stage %d (only saving LoRA and Projector).", stage)
+            
         current_lora_path = os.path.join(stage_output_dir, "lora_weights")
         current_projector_path = os.path.join(stage_output_dir, "projector.pt")
         
-        # 手动保存 LoRA 和 Projector（Trainer 有时不会自动按我们的结构存）
+        # 手动保存 LoRA 和 Projector
+        os.makedirs(current_lora_path, exist_ok=True)
         model.model.save_pretrained(current_lora_path)
         torch.save(model.projector.state_dict(), current_projector_path)
+        
+        # 如果不保存全模型，我们也至少存一下分词器，方便后续推理加载
+        tokenizer.save_pretrained(stage_output_dir)
         
         logger.info(f"✅ Stage {stage} completed. Weights saved to {stage_output_dir}")
         

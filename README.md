@@ -10,14 +10,32 @@ cd BioLatentCOT
 
 2️⃣ Create conda environment (recommended)
 
+```
+# old env:
+
 conda env create -f biolatent_environment1.yml
 
 conda activate biolatenecot_dev
 
-pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1 
+pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit==2024.3.6024.3.6 peft==0.17.1  plotext wandb liger-kernel vllm
 
-pip install plotext
+# new env:
 
+conda env create -f biolatent_environment2.yml
+
+conda activate biolatenecot_dev
+
+pip install trl==0.15.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm
+
+
+# 0107-1:
+
+conda env create -f biolatent_environment2.yml
+
+conda activate biolatenecot_dev
+
+pip install trl==0.26.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm==0.11.2
+```
 
 📊 Data Preparation
 
@@ -67,34 +85,133 @@ huggingface-cli download --resume-download ibm-research/materials.smi-ted --loca
 🏋️ Training 
 
 ```
-accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
-  --mode train \
-  --include_cot false \
-  --output_dir ./outputs/stage1_no_cot \
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
+  --training_stage 1 \
+  --epochs_per_stage 3 \
+  --output_dir ./outputs/stage1 \
   --batch_size 2 \
-  --grad_accum 1 \
-  --epochs 3
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
-accelerate launch --multi_gpu --num_processes 2 train_sft_stage2.py \
-  --mode train \
-  --include_cot true \
-  --lora_path ./outputs/stage1_no_cot/lora_weights \
-  --projector_path ./outputs/stage1_no_cot/projector.pt \
-  --output_dir ./outputs/stage2_with_cot \
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
+  --training_stage 2 \
+  --epochs_per_stage 3 \
+  --lora_path ./outputs/stage1/stage1/lora_weights \
+  --projector_path ./outputs/stage1/stage1/mm_projector.pt \
+  --output_dir ./outputs/stage2 \
   --batch_size 2 \
-  --epochs 3
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
-accelerate launch --multi_gpu --num_processes 2 train_coconut.py \
-  --lora_path ./outputs/stage2_with_cot/lora_weights \
-  --projector_path ./outputs/stage2_with_cot/projector.pt \
-  --output_dir ./outputs/coconut \
+accelerate launch --multi_gpu --num_processes 2 train_stage3.py \
+  --training_stage 3 \
   --epochs_per_stage 3 \
   --max_latent_stage 7 \
-  --c_thought 2
+  --c_thought 2 \
+  --lora_path ./outputs/stage2/stage2/lora_weights \
+  --projector_path ./outputs/stage2/stage2/mm_projector.pt \
+  --output_dir ./outputs/stage3 \
+  --batch_size 2 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
+accelerate launch --multi_gpu --num_processes 2 train_grpo_try2.py \
+  --output_dir debug \
+  --batch_size 1 \
+  --grad_accum 4 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max_prompt_length 2048 \
+  --max_completion_length 256 \
+  --num_generations 8 \
+  --steps_per_generation 4 \
+  --num_iterations 1 \
+  --beta 0.0 \
+  --use_liger \
+  --use_vllm \
+  --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.4 \
+  --vllm_max_model_len 4096 \
+  --gradient_checkpointing
+  
 ```
 
+```
+accelerate launch --multi_gpu --num_processes 8 train_stage3.py \
+  --training_stage 1 \
+  --epochs_per_stage 3 \
+  --output_dir ./outputs/stage1 \
+  --batch_size 4 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
 
+accelerate launch --multi_gpu --num_processes 8 train_stage3.py \
+  --training_stage 2 \
+  --epochs_per_stage 3 \
+  --lora_path ./outputs/stage1/stage1/lora_weights \
+  --projector_path ./outputs/stage1/stage1/mm_projector.pt \
+  --output_dir ./outputs/stage2 \
+  --batch_size 4 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
+
+accelerate launch --multi_gpu --num_processes 8 train_stage3.py \
+  --training_stage 3 \
+  --is_coconut false \
+  --is_both_latent true \
+  --epochs_per_stage 3 \
+  --lora_path ./outputs/stage2/stage2/lora_weights \
+  --projector_path ./outputs/stage2/stage2/mm_projector.pt \
+  --output_dir ./outputs/stage3 \
+  --batch_size 2 \
+  --grad_accum 2 \
+  --cf_lambda 0.2 --cf_margin 0.5 --cf_prob 1.0
+
+accelerate launch --multi_gpu --num_processes 8 train_grpo_try2.py \
+  --stage 3 \
+  --run_name grpo_stage3 \
+  --lora_path ./outputs/stage3/stage3/lora_weights \
+  --projector_path ./outputs/stage3/stage3/mm_projector.pt \
+  --output_dir ./outputs/stage3_grpo \
+  --is_both_latent true \
+  --batch_size 1 \
+  --grad_accum 4 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max_prompt_length 2048 \
+  --max_completion_length 1024 \
+  --num_generations 8 \
+  --steps_per_generation 4 \
+  --num_iterations 1 \
+  --beta 0.0 \
+  --use_liger \
+  --use_vllm \
+  --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.4 \
+  --vllm_max_model_len 4096 \
+  --gradient_checkpointing
+
+accelerate launch --multi_gpu --num_processes 8 train_grpo_try2.py \
+  --stage 4 \
+  --run_name grpo_stage4 \
+  --lora_path ./outputs/stage3_grpo/grpo_stage3/lora_weights \
+  --projector_path ./outputs/stage3_grpo/grpo_stage3/mm_projector.pt \
+  --output_dir ./outputs/stage4 \
+  --is_both_latent true \
+  --corrupt_prob 0.2 \
+  --corrupt_latent_noise_std 0.0 \
+  --batch_size 1 \
+  --grad_accum 4 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max_prompt_length 2048 \
+  --max_completion_length 1024 \
+  --num_generations 8 \
+  --steps_per_generation 4 \
+  --num_iterations 1 \
+  --beta 0.0 \
+  --use_liger \
+  --use_vllm \
+  --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.4 \
+  --vllm_max_model_len 4096 \
+  --gradient_checkpointing
+  ```
 
 
 

@@ -211,6 +211,8 @@ def extract_fields(example, is_eval: bool = False):
         "label": f"<answer> {label_value} </answer>",
         # 结构化思维链 (CoT)
         "cot": cot_value,
+        # CoT 字符长度（用于动态分配 latent 数量）
+        "cot_len": len(cot_value) if cot_value is not None else 0,
         # 分步思维链 (Coconut 专用)
         "cot_steps": cot_steps,
         "task": task
@@ -426,6 +428,46 @@ def load_data(
             remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
         )
 
+    return dataset
+
+
+# --------------------------------
+# 3b. GRPO prompt-only dataset (for RL)
+# --------------------------------
+def load_grpo_data(path):
+    """
+    Load a prompt-only dataset for GRPO-style RL training.
+
+    Returns a HuggingFace `Dataset` with (at least):
+    - `prompt`: str
+    - `input_smiles`: list[str]
+    - `label`: str (ground-truth answer wrapped as `<answer> ... </answer>`, used for reward shaping)
+
+    Tokenization/collation should be handled by the GRPO trainer's collate function.
+    """
+    # 扫描所有 JSON 文件并排除 rxn/rcr.json
+    all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
+    data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
+    from datasets import load_dataset
+    ds = load_dataset("json", data_files=data_files)["train"]
+
+    # 过滤已知损坏的数据 ID
+    bad_ids = [
+        "f7e567a6-47de-4c77-8c1f-9049689322e8",
+        "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
+        "9cb0a77d-6203-4686-9c8b-45fd3fc770f2",
+    ]
+    ds = ds.filter(lambda x: x["id"] not in bad_ids)
+
+    dataset = ds.map(
+        extract_fields,
+        batched=False,
+        remove_columns=ds.column_names,
+    )
+
+    # Keep only what GRPO needs
+    dataset = dataset.rename_column("query", "prompt")
+    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("prompt", "input_smiles", "label")])
     return dataset
 
 

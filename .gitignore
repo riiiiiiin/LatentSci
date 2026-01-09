@@ -42,6 +42,9 @@ Thumbs.db
 # 忽略任何目录下以 output 开头的文件夹
 **/output*/
 
+# 忽略任何目录下以 debug 开头的文件夹
+**/debug*/
+
 # SMI-TED model file
 materials/
 **/logs/
