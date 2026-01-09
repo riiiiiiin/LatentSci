@@ -140,10 +140,10 @@ def run_inference_on_dataset(
         batch_indices = list(range(start_idx, end_idx))
         # Collect per-sample items
         input_tensors = []
-        attn_tensors = []
         smiles_batch = []
         raw_items = []
 
+        # TODO: batch inputs in dataloader
         for idx in batch_indices:
             item = dataset[idx]
             raw_items.append(item)
@@ -182,14 +182,10 @@ def run_inference_on_dataset(
         if gen_tensor.size(0) != batch_size:
             raise Exception(f"Generated tensor batch size ({gen_tensor.size(0)}) != expected ({batch_size}).")
         
-        for i in range(batch_size):
-            try:
-                gen_seq = gen_tensor[i]
-                decoded = tokenizer.decode(gen_seq, skip_special_tokens=True).strip()
-                generation_outputs.append({"result": decoded})
-            except Exception as e:
-                logger.error(f"Error decoding generated sequence: {e}")
-                generation_outputs.append({"error": str(e)})
+        gen_tensor_cpu = gen_tensor.cpu().tolist()
+        decoded_list = tokenizer.batch_decode(gen_tensor_cpu, skip_special_tokens=True)
+        for decoded in decoded_list:
+            generation_outputs.append({"result": decoded.strip()})
 
     return generation_outputs
 
