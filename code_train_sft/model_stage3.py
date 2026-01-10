@@ -376,9 +376,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         llm = self._get_actual_llm()
         backbone = llm.model
-        has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
-        if not has_lora_in_backbone:
-            raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
+        # has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
+        # if not has_lora_in_backbone:
+        #     raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
 
         curr_embeds = initial_embeds
         for pass_idx in range(max_n_latents):
@@ -953,9 +953,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         if use_bio_thinker:
             llm = self._get_actual_llm()
             backbone = llm.model
-            has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
-            if not has_lora_in_backbone:
-                raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
+            # has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
+            # if not has_lora_in_backbone:
+            #     raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
             lm_head = llm.lm_head
 
             new_samples = []

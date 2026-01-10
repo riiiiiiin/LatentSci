@@ -18,6 +18,11 @@ conda env create -f biolatent_environment2.yml
 conda activate biolatenecot_dev
 
 pip install trl==0.26.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm==0.11.2
+
+# During the two following cmds, there might be some compatibility errors. Ignore them.
+pip install PyTDC
+
+pip install transformers==4.57.3 accelerate==1.10.1
 ```
 
 📊 Data Preparation
