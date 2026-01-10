@@ -41,7 +41,7 @@ PYTHON_BIN="python"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_NAME="${EXP_NAME}_${TIMESTAMP}"
-INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/inference_results_${TIMESTAMP}.json"
+INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.json"
 
 echo "========== Stage-3 Inference Runner =========="
 echo "EXP_NAME:                  ${EXP_NAME}"
@@ -167,10 +167,16 @@ if [[ ! -d "eval" ]]; then
   exit 12
 fi
 
+cd eval || {
+  echo "ERROR: Failed to cd to eval dir." | tee -a "${LOG_FILE}"
+  exit 14
+}
+
 EVAL_CMD=(
-  "${PYTHON_BIN}" "eval/eval_results.py"
-  --result_path "${RESULT_PATH}"
+  "${PYTHON_BIN}" "eval_results.py"
+  --result_path "../${INFERENCE_RESULTS_PATH}"
   --log_name "${LOG_NAME}"
+  --dataset_paths "../${DATA_PATH}"
 )
 
 echo "Running evaluation command:" | tee -a "../${LOG_FILE}"
