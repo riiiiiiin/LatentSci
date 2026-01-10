@@ -93,14 +93,30 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
     return model
 
 
-def format_reward_answer_tag(prompts: List[str], completions: List[str], completion_ids=None, **kwargs):
+def format_reward_answer_tag(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    corrupt_task_latents: Optional[List[bool]] = None,
+    **kwargs,
+):
     """
     Minimal "try1" reward:
     - reward 1.0 if model outputs a non-empty `<answer> ... </answer>` span
     - else 0.0
     """
+    if corrupt_task_latents is None:
+        corrupt_flags = None
+    elif isinstance(corrupt_task_latents, torch.Tensor):
+        corrupt_flags = [bool(x) for x in corrupt_task_latents.detach().cpu().tolist()]
+    else:
+        corrupt_flags = [bool(x) for x in corrupt_task_latents]
+
     rewards = []
-    for c in completions:
+    for i, c in enumerate(completions):
+        if corrupt_flags is not None and i < len(corrupt_flags) and corrupt_flags[i]:
+            rewards.append(0.0)
+            continue
         c = c or ""
         lo = c.lower()
         start = lo.find("<answer>")
@@ -172,16 +188,32 @@ def _extract_answer_text(completion: str) -> Optional[str]:
     return m.group(1).strip()
 
 
-def reward_answer_type_validity(prompts: List[str], completions: List[str], completion_ids=None, **kwargs):
+def reward_answer_type_validity(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    corrupt_task_latents: Optional[List[bool]] = None,
+    **kwargs,
+):
     """
-    Reward 1.0 if the `<answer>...</answer>` content matches the *type* the prompt asks for:
+    Reward 5.0 if the `<answer>...</answer>` content matches the *type* the prompt asks for:
     - SMILES: RDKit parses
     - Number: parses as float
     - Yes/No: matches yes/no (case-insensitive)
     Otherwise reward 0.0.
     """
+    if corrupt_task_latents is None:
+        corrupt_flags = None
+    elif isinstance(corrupt_task_latents, torch.Tensor):
+        corrupt_flags = [bool(x) for x in corrupt_task_latents.detach().cpu().tolist()]
+    else:
+        corrupt_flags = [bool(x) for x in corrupt_task_latents]
+
     rewards: list[float] = []
-    for p, c in zip(prompts, completions):
+    for i, (p, c) in enumerate(zip(prompts, completions)):
+        if corrupt_flags is not None and i < len(corrupt_flags) and corrupt_flags[i]:
+            rewards.append(0.0)
+            continue
         expected = _infer_expected_answer_type(p)
         answer = _extract_answer_text(c or "")
         if not answer:
@@ -206,20 +238,20 @@ def reward_answer_type_validity(prompts: List[str], completions: List[str], comp
                 if mol is not None:
                     ok = True
                     break
-            rewards.append(1.0 if ok else 0.0)
+            rewards.append(5.0 if ok else 0.0)
         elif expected == "number":
             cleaned = re.sub(r"^\s*(count|number)\s*[:=]\s*", "", cleaned, flags=re.IGNORECASE).strip()
             cleaned = cleaned.replace(",", "")
             try:
                 float(cleaned)
-                rewards.append(1.0)
+                rewards.append(5.0)
             except Exception:
                 rewards.append(0.0)
         elif expected == "yesno":
             lo = cleaned.lower()
             lo = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", lo).strip()
             if lo in {"yes", "no"}:
-                rewards.append(1.0)
+                rewards.append(5.0)
             else:
                 rewards.append(0.0)
         else:
@@ -343,6 +375,7 @@ def reward_answer_correctness_bench(
     completion_ids=None,
     label: Optional[List[str]] = None,
     labels: Optional[List[str]] = None,
+    corrupt_task_latents: Optional[List[bool]] = None,
     task: Optional[List[str]] = None,
     subtask: Optional[List[str]] = None,
     meta: Optional[List[str]] = None,
@@ -362,8 +395,18 @@ def reward_answer_correctness_bench(
     """
     gt_list = labels if labels is not None else label
 
+    if corrupt_task_latents is None:
+        corrupt_flags = None
+    elif isinstance(corrupt_task_latents, torch.Tensor):
+        corrupt_flags = [bool(x) for x in corrupt_task_latents.detach().cpu().tolist()]
+    else:
+        corrupt_flags = [bool(x) for x in corrupt_task_latents]
+
     rewards: list[float] = []
     for i, (p, c) in enumerate(zip(prompts, completions, strict=True)):
+        if corrupt_flags is not None and i < len(corrupt_flags) and corrupt_flags[i]:
+            rewards.append(0.0)
+            continue
         expected = _infer_expected_answer_type(p)
         pred = _extract_answer_text(c or "")
         if pred is None:
@@ -584,8 +627,8 @@ def reward_stage4_scaled_correctness(
     Stage 4 reward (latent-scaled):
     - If corrupted: reward = 0
     - If not corrupted:
-        - correct: +1 / N
-        - wrong:   -1 / N
+        - correct: +4 / N
+        - wrong:   -4 / N
       where N = number of task latent tokens (clamped to >= 1).
     """
     gt_list = labels if labels is not None else label
@@ -596,7 +639,6 @@ def reward_stage4_scaled_correctness(
         corrupt_task_latents = [False for _ in completions]
     if task_latent_count is None:
         task_latent_count = [1 for _ in completions]
-
     correctness = reward_answer_correctness_bench(
         prompts=prompts,
         completions=completions,
@@ -614,7 +656,7 @@ def reward_stage4_scaled_correctness(
         n_latents = int(n) if n is not None else 0
         n_latents = max(n_latents, 1)
         is_correct = bool(corr >= 0.5)
-        out.append((1.0 / n_latents) if is_correct else (-1.0 / n_latents))
+        out.append((4.0 / n_latents) if is_correct else (-4.0 / n_latents))
     return out
 
 
@@ -624,8 +666,8 @@ def main():
         "--stage",
         type=int,
         default=3,
-        choices=[3, 4],
-        help="GRPO training stage (3=baseline rewards, 4=latent-corrupt rewards + masking).",
+        choices=[3, 4, 5],
+        help="GRPO training stage (3=baseline rewards, 4=latent-corrupt rewards + masking, 5=combined stage3+stage4 rewards).",
     )
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
 
@@ -652,19 +694,19 @@ def main():
         "--corrupt_prob",
         type=float,
         default=0.0,
-        help="Probability to corrupt task latent embeddings per prompt group (stage=4 only).",
+        help="Probability to corrupt task latent embeddings per prompt group (stage=4/5 only).",
     )
     parser.add_argument(
         "--corrupt_latent_noise_std",
         type=float,
         default=0.0,
-        help="Std of Gaussian noise to replace task latent embeddings (0 -> zeros) (stage=4 only).",
+        help="Std of Gaussian noise to replace task latent embeddings (0 -> zeros) (stage=4/5 only).",
     )
     parser.add_argument(
         "--is_both_latent",
         type=lambda x: (str(x).lower() == "true"),
         default=True,
-        help="Enable task-latent generation via is_both_latent (stage=4 requires true).",
+        help="Enable task-latent generation via is_both_latent (stage=4/5 requires true).",
     )
 
     # GRPO
@@ -707,8 +749,8 @@ def main():
         "num_heads": ModelConfig.NUM_HEADS,
     }
     use_both_latent = bool(args.is_both_latent)
-    if args.stage == 4 and not use_both_latent:
-        raise ValueError("stage=4 requires --is_both_latent true.")
+    if args.stage in (4, 5) and not use_both_latent:
+        raise ValueError("stage=4/5 requires --is_both_latent true.")
     model = Qwen3MoleculeLLM(
         qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
         mol_config=mol_config,
@@ -770,6 +812,16 @@ def main():
 
     if args.stage == 4:
         reward_funcs = [reward_stage4_corrupt_or_correct, reward_stage4_scaled_correctness]
+        corrupt_prob = float(args.corrupt_prob)
+        corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
+    elif args.stage == 5:
+        reward_funcs = [
+            format_reward_answer_tag,
+            reward_answer_type_validity,
+            reward_answer_correctness_bench,
+            reward_stage4_corrupt_or_correct,
+            reward_stage4_scaled_correctness,
+        ]
         corrupt_prob = float(args.corrupt_prob)
         corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
     else:
