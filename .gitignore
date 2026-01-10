@@ -45,3 +45,4 @@ Thumbs.db
 # 忽略任何目录下以 debug 开头的文件夹
 **/debug*/
 
+code_train_sft/oracle/
