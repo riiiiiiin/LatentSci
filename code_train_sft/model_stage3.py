@@ -374,17 +374,22 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         if max_n_latents == 0:
             return initial_embeds
 
+        llm = self._get_actual_llm()
+        backbone = llm.model
+        has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
+        if not has_lora_in_backbone:
+            raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
+
         curr_embeds = initial_embeds
         for pass_idx in range(max_n_latents):
             # 执行前向传播获取隐藏状态
-            outputs = self.model(
+            outputs = backbone(
                 inputs_embeds=curr_embeds,
                 attention_mask=attention_mask,
-                output_hidden_states=True,
                 return_dict=True,
                 use_cache=False
             )
-            hidden_states = outputs.hidden_states[-1]
+            hidden_states = outputs.last_hidden_state
             
             new_embeds = curr_embeds.clone()
 
@@ -946,6 +951,13 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # otherwise append a new latent embedding (from hidden state) refined by TaskThinker.
         # =========================================================
         if use_bio_thinker:
+            llm = self._get_actual_llm()
+            backbone = llm.model
+            has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
+            if not has_lora_in_backbone:
+                raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
+            lm_head = llm.lm_head
+
             new_samples = []
             task_latent_counts = []
             for b in range(B):
@@ -968,20 +980,21 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     # Task-latent token *sampling* does not need gradients; gradients are provided by the later GRPO
                     # log-prob forward on the full (prompt + completion) sequence.
                     with torch.no_grad():
-                        out = self.model(
+                        out = backbone(
                             inputs_embeds=full_seq,
                             attention_mask=full_mask,
-                            output_hidden_states=True,
                             return_dict=True,
                             use_cache=False,
                         )
-                    next_id = int(out.logits[:, -1, :].argmax(dim=-1).item())
+                        last_hidden = out.last_hidden_state  # (1, L, d)
+                        logits_last = lm_head(last_hidden[:, -1, :])  # (1, vocab)
+                    next_id = int(logits_last.argmax(dim=-1).item())
                     if next_id == int(self.end_latent_id):
                         latent_block = torch.cat([latent_block, end_latent_emb], dim=1)
                         ended = True
                         break
 
-                    latent_state = out.hidden_states[-1][:, -1:, :].to(dtype=torch.float32)
+                    latent_state = last_hidden[:, -1:, :].to(dtype=torch.float32)
                     latent_state_hist.append(latent_state)
                     if refine_bio_tokens and bio_positions:
                         batched_bio = base_prefix[:, bio_positions].to(dtype=self.model.dtype)
