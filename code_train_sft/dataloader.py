@@ -197,6 +197,10 @@ def extract_fields(example):
         "input_smiles": input_smiles,
         # LLM 的监督答案
         "label": f"<answer> {label_value} </answer>",
+        # Benchmark routing (used by GRPO rewards)
+        "task": example.get("task"),
+        "subtask": example.get("subtask"),
+        "meta": example.get("meta"),
         # 结构化思维链 (CoT)
         "cot": cot_value,
         # CoT 字符长度（用于动态分配 latent 数量）
@@ -383,7 +387,7 @@ def load_data(
                 "c_thought": c_thought, 
                 "max_len": max_len
             },
-            remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+            remove_columns=["query", "input_smiles", "label", "cot", "cot_steps", "task", "subtask", "meta"]
         )
     else:
         # 标准 SFT 模式
@@ -391,7 +395,7 @@ def load_data(
             llm_tokenize,
             batched=False,
                 fn_kwargs={"include_cot": include_cot, "max_len": max_len},
-                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps", "task", "subtask", "meta"]
         )
 
     return dataset
@@ -433,7 +437,9 @@ def load_grpo_data(path):
 
     # Keep only what GRPO needs
     dataset = dataset.rename_column("query", "prompt")
-    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("prompt", "input_smiles", "label")])
+    dataset = dataset.remove_columns(
+        [c for c in dataset.column_names if c not in ("prompt", "input_smiles", "label", "task", "subtask", "meta")]
+    )
     return dataset
 
 

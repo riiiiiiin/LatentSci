@@ -1,8 +1,10 @@
 import os
+import sys
 import argparse
 import logging
 import re
 import math
+import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -305,6 +307,229 @@ def reward_answer_correctness(
     return rewards
 
 
+_BENCH_REWARD_UTILS_ON_PATH = False
+_MOLOPT_EVALUATER_CACHE: dict[str, object] = {}
+
+
+def _ensure_bench_reward_utils_importable() -> None:
+    global _BENCH_REWARD_UTILS_ON_PATH
+    if _BENCH_REWARD_UTILS_ON_PATH:
+        return
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    reward_utils_dir = os.path.join(current_dir, "reward_utils")
+    if reward_utils_dir not in sys.path:
+        sys.path.append(reward_utils_dir)
+    _BENCH_REWARD_UTILS_ON_PATH = True
+
+
+def _clean_group_name(group: Optional[str]) -> Optional[str]:
+    if group is None:
+        return None
+    # Some benchmark meta strings include a trailing '.' (e.g., "carboxyl.")
+    return str(group).strip().rstrip(".").strip()
+
+
+def _extract_smiles_candidate(answer_text: str) -> str:
+    s = (answer_text or "").strip().strip("\"'`")
+    s = re.sub(r"^\s*smiles\s*[:=]\s*", "", s, flags=re.IGNORECASE).strip()
+    if re.search(r"\s", s):
+        s = s.split()[0]
+    return s.strip().rstrip(".").strip()
+
+
+def reward_answer_correctness_bench(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    label: Optional[List[str]] = None,
+    labels: Optional[List[str]] = None,
+    task: Optional[List[str]] = None,
+    subtask: Optional[List[str]] = None,
+    meta: Optional[List[str]] = None,
+    **kwargs,
+):
+    """
+    Benchmark-aware correctness reward for ChemCoTBench-style data.
+
+    - For numeric and yes/no answers: keep the current strict matching logic.
+    - For SMILES answers:
+        - mol_edit: check functional-group edit validity (no fixed target SMILES)
+        - mol_opt: check property improvement using benchmark oracle
+        - mol_und/reaction: exact match (as before)
+
+    Returns:
+      10.0 if correct, else 0.0
+    """
+    gt_list = labels if labels is not None else label
+
+    rewards: list[float] = []
+    for i, (p, c) in enumerate(zip(prompts, completions, strict=True)):
+        expected = _infer_expected_answer_type(p)
+        pred = _extract_answer_text(c or "")
+        if pred is None:
+            rewards.append(0.0)
+            continue
+
+        pred_clean = _extract_smiles_candidate(pred) if expected == "smiles" else pred.strip().strip("\"'`")
+
+        # Pull per-sample benchmark routing info when available
+        t = task[i] if task is not None and i < len(task) else None
+        st = subtask[i] if subtask is not None and i < len(subtask) else None
+        m = meta[i] if meta is not None and i < len(meta) else None
+
+        if expected == "smiles":
+            # 1) Editing benchmark (functional-group constraints)
+            if t == "mol_edit":
+                ok = False
+                try:
+                    meta_dict = json.loads(m) if isinstance(m, str) and m else {}
+                except Exception:
+                    meta_dict = {}
+
+                src = meta_dict.get("molecule")
+                if isinstance(src, str) and src.strip():
+                    _ensure_bench_reward_utils_importable()
+                    try:
+                        from ChemCoTBench.eval_moledit import (  # type: ignore
+                            check_edit_add_valid,
+                            check_edit_del_valid,
+                            check_edit_sub_valid,
+                        )
+                    except Exception:
+                        check_edit_add_valid = check_edit_del_valid = check_edit_sub_valid = None  # type: ignore
+
+                    try:
+                        if st == "add" and check_edit_add_valid is not None:
+                            group = _clean_group_name(meta_dict.get("added_group"))
+                            if group:
+                                ok = bool(check_edit_add_valid(src=src, tgt=pred_clean, group=group))
+                        elif st == "delete" and check_edit_del_valid is not None:
+                            group = _clean_group_name(meta_dict.get("removed_group"))
+                            if group:
+                                ok = bool(check_edit_del_valid(src=src, tgt=pred_clean, group=group))
+                        elif st == "sub" and check_edit_sub_valid is not None:
+                            add_group = _clean_group_name(meta_dict.get("added_group"))
+                            remove_group = _clean_group_name(meta_dict.get("removed_group"))
+                            if add_group and remove_group:
+                                ok = bool(
+                                    check_edit_sub_valid(
+                                        src=src, tgt=pred_clean, remove_group=remove_group, add_group=add_group
+                                    )
+                                )
+                    except Exception:
+                        ok = False
+
+                rewards.append(10.0 if ok else 0.0)
+                continue
+
+            # 2) Molecule optimization benchmark (oracle-based improvement)
+            if t == "mol_opt":
+                ok = False
+                try:
+                    meta_dict = json.loads(m) if isinstance(m, str) and m else {}
+                except Exception:
+                    meta_dict = {}
+
+                src = meta_dict.get("molecule")
+                prop_dict = {
+                    "logp": "logp",
+                    "solubility": "solubility",
+                    "qed": "qed",
+                    "drd": "drd2",
+                    "jnk": "jnk3",
+                    "gsk": "gsk3b",
+                }
+                prop = prop_dict.get(str(st or "").strip().lower())
+                if isinstance(src, str) and src.strip() and prop:
+                    _ensure_bench_reward_utils_importable()
+                    try:
+                        from ChemCoTBench.core.eval_metric import mol_opt_evaluater  # type: ignore
+
+                        evaluater = _MOLOPT_EVALUATER_CACHE.get(prop)
+                        if evaluater is None:
+                            evaluater = mol_opt_evaluater(prop=prop)
+                            _MOLOPT_EVALUATER_CACHE[prop] = evaluater
+
+                        oracle = getattr(evaluater, "property_oracle", None)
+                        if oracle is not None:
+                            src_score = oracle(src)
+                            tgt_score = oracle(pred_clean)
+                            if src_score is not None and tgt_score is not None:
+                                ok = bool((tgt_score - src_score) > 0)
+                    except Exception:
+                        ok = False
+
+                rewards.append(10.0 if ok else 0.0)
+                continue
+
+            # 3) Default SMILES: exact match (canonicalized)
+            if gt_list is None:
+                rewards.append(0.0)
+                continue
+            gt = gt_list[i] if i < len(gt_list) else ""
+            gold = _extract_answer_text(gt or "") or (gt or "").strip()
+            gold_clean = _extract_smiles_candidate(gold)
+
+            Chem = _get_rdkit_chem()
+
+            def canon(s: str) -> Optional[str]:
+                try:
+                    mol = Chem.MolFromSmiles(s)  # type: ignore[attr-defined]
+                except Exception:
+                    mol = None
+                if mol is None:
+                    return None
+                try:
+                    return Chem.MolToSmiles(mol, canonical=True)  # type: ignore[attr-defined]
+                except Exception:
+                    return None
+
+            pred_can = canon(pred_clean)
+            gold_can = canon(gold_clean)
+            rewards.append(10.0 if (pred_can is not None and gold_can is not None and pred_can == gold_can) else 0.0)
+            continue
+
+        # Non-SMILES: keep original strict matching logic
+        if gt_list is None:
+            rewards.append(0.0)
+            continue
+        gt = gt_list[i] if i < len(gt_list) else ""
+        gold = _extract_answer_text(gt or "") or (gt or "").strip()
+
+        pred_clean = pred_clean.strip()
+        gold_clean = (gold or "").strip().strip("\"'`")
+
+        if expected == "number":
+            def parse_num(s: str) -> Optional[float]:
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+
+            pn = parse_num(pred_clean)
+            gn = parse_num(gold_clean)
+            if pn is None or gn is None:
+                rewards.append(0.0)
+            else:
+                rewards.append(10.0 if math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3) else 0.0)
+        elif expected == "yesno":
+            def norm_yesno(s: str) -> Optional[str]:
+                s = s.strip().lower()
+                if s in {"yes"}:
+                    return "yes"
+                if s in {"no"}:
+                    return "no"
+                return None
+
+            py = norm_yesno(pred_clean)
+            gy = norm_yesno(gold_clean)
+            rewards.append(10.0 if (py is not None and gy is not None and py == gy) else 0.0)
+        else:
+            rewards.append(10.0 if pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "" else 0.0)
+
+    return rewards
+
+
 def reward_stage4_corrupt_or_correct(
     prompts: List[str],
     completions: List[str],
@@ -326,11 +551,14 @@ def reward_stage4_corrupt_or_correct(
     if corrupt_task_latents is None:
         corrupt_task_latents = [False for _ in completions]
 
-    correctness = reward_answer_correctness(
+    correctness = reward_answer_correctness_bench(
         prompts=prompts,
         completions=completions,
         completion_ids=completion_ids,
         labels=gt_list,
+        task=kwargs.get("task"),
+        subtask=kwargs.get("subtask"),
+        meta=kwargs.get("meta"),
     )
     out: list[float] = []
     for is_corrupt, corr in zip(corrupt_task_latents, correctness, strict=True):
@@ -369,11 +597,14 @@ def reward_stage4_scaled_correctness(
     if task_latent_count is None:
         task_latent_count = [1 for _ in completions]
 
-    correctness = reward_answer_correctness(
+    correctness = reward_answer_correctness_bench(
         prompts=prompts,
         completions=completions,
         completion_ids=completion_ids,
         labels=gt_list,
+        task=kwargs.get("task"),
+        subtask=kwargs.get("subtask"),
+        meta=kwargs.get("meta"),
     )
     out: list[float] = []
     for is_corrupt, corr, n in zip(corrupt_task_latents, correctness, task_latent_count, strict=True):
@@ -542,7 +773,7 @@ def main():
         corrupt_prob = float(args.corrupt_prob)
         corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
     else:
-        reward_funcs = [format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness]
+        reward_funcs = [format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness_bench]
         corrupt_prob = 0.0
         corrupt_latent_noise_std = 0.0
 
