@@ -249,6 +249,12 @@ def train_stage3():
     parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
     parser.add_argument("--training_stage", type=int, default=3, choices=[1, 2, 3], help="Which stage to train: 1 (No COT), 2 (With COT), 3 (Latent/Coconut)")
+    parser.add_argument(
+        "--freeze_llm",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the text LLM weights (including any loaded LoRA adapters).",
+    )
     # Stage 3 switches (only effective when --training_stage 3)
     parser.add_argument(
         "--is_coconut",
@@ -388,6 +394,11 @@ def train_stage3():
                 bias="none",
             )
             model.model = get_peft_model(model.model, lora_config)
+
+        if bool(args.freeze_llm):
+            for param in model.model.parameters():
+                param.requires_grad = False
+            logger.info("freeze_llm=True: froze all LLM (base + LoRA) parameters.")
         
         # 确保投影器和 Bio Updater 可训练
         for param in model.projector.parameters():
