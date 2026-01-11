@@ -34,3 +34,7 @@ for dataset_path in dataset_paths:
     if 'ChemLLMBench' in dataset_path:
         from ChemLLMBench.eval_all import eval_all_ChemLLMBench
         eval_all_ChemLLMBench(log_name, dataset_path, logs_dir, results_dir)
+    
+    if 'ChemCoTDataset-test' in dataset_path:
+        from ChemCoTDataset_textwise.eval_all import eval_all_ChemCoTDataset_textwise
+        eval_all_ChemCoTDataset_textwise(log_name, dataset_path, logs_dir, results_dir)

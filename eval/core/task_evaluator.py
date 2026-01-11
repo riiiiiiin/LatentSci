@@ -14,6 +14,9 @@ class BaseTaskEvaluator(ABC):
     def __init__(self, logger: logging.Logger = None):
         self.logger = logger or logging.getLogger(__name__)
 
+    def extract_answer(self, pred: str) -> str:
+        return extract_answer(pred)
+    
     @abstractmethod
     def extract_gt(self, gt_raw_item: Any) -> Any:
         """从单个 gt_raw[i] 提取 gt（可覆盖）。"""
@@ -25,7 +28,7 @@ class BaseTaskEvaluator(ABC):
         返回字典形式的指标，例如 {"bleu": 0.8, ...}
         """
         raise NotImplementedError
-
+    
     @abstractmethod
     def prepare_metadata(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """从单个 sample 准备 metadata（可覆盖）。"""
@@ -51,7 +54,6 @@ class BaseTaskEvaluator(ABC):
         sample_count: int,
         gt_path: str,
         logs_dir: str,
-        results_dir: str,
         task_name: str,
     ) -> Dict[str, Any]:
         log_dir = os.path.join(logs_dir, task_name)
@@ -78,7 +80,7 @@ class BaseTaskEvaluator(ABC):
             if 'result' in sample:
                 if sample_count > 1:
                     raise ValueError("sample_count should be 1 when result is in sample")
-                pred = extract_answer(sample['result'])
+                pred = self.extract_answer(sample['result'])
                 if pred is None:
                     invalid_num += 1
                     continue
@@ -96,7 +98,7 @@ class BaseTaskEvaluator(ABC):
                     invalid_num += 1
                     continue
                 for j in range(sample_count):
-                    pred = extract_answer(results[j])
+                    pred = self.extract_answer(results[j])
                     if pred is None:
                         invalid_num += 1
                         continue
@@ -130,13 +132,6 @@ class BaseTaskEvaluator(ABC):
             "raw": res_list,
             "valid_rate": 1.0 - float(invalid_num) / len(samples) if len(samples) > 0 else 0.0,
         }
-
-        # 保存结果
-        out_dir = os.path.join(results_dir, task_name)
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"eval_score_{model_name}.json")
-        with open(out_path, 'w') as f:
-            json.dump(final_res, f, indent=4)
 
         return final_res
 
@@ -174,7 +169,14 @@ class TextSimiliarityTaskEvaluator(BaseTaskEvaluator):
 
     def prepare_metadata(self, sample):
         return None
+
+class AllCoTTextSimiliarityTaskEvaluator(TextSimiliarityTaskEvaluator):
+    def extract_answer(self, pred):
+        return pred
     
+    def extract_gt(self, gt_raw_item):
+        return gt_raw_item['cot_reference']
+
 class ExactMatchTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
         pass
