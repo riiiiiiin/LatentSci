@@ -255,6 +255,30 @@ def train_stage3():
         default=False,
         help="Freeze the text LLM weights (including any loaded LoRA adapters).",
     )
+    parser.add_argument(
+        "--freeze_projector",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the multi-modal projector module.",
+    )
+    parser.add_argument(
+        "--freeze_bio_updater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater module (memory update).",
+    )
+    parser.add_argument(
+        "--freeze_bio_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_thinker module.",
+    )
+    parser.add_argument(
+        "--freeze_task_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the task_thinker module.",
+    )
     # Stage 3 switches (only effective when --training_stage 3)
     parser.add_argument(
         "--is_coconut",
@@ -402,17 +426,17 @@ def train_stage3():
         
         # 确保投影器和 Bio Updater 可训练
         for param in model.projector.parameters():
-            param.requires_grad = True
+            param.requires_grad = not bool(args.freeze_projector)
         
         for param in model.bio_updater.parameters():
-            param.requires_grad = True
+            param.requires_grad = not bool(args.freeze_bio_updater)
 
         if hasattr(model, "bio_thinker"):
             for param in model.bio_thinker.parameters():
-                param.requires_grad = bool(is_both_latent)
+                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_bio_thinker))
         if hasattr(model, "task_thinker"):
             for param in model.task_thinker.parameters():
-                param.requires_grad = bool(is_both_latent)
+                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_task_thinker))
         
         model.model.train()
 
