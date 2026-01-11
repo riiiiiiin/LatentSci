@@ -708,6 +708,18 @@ def main():
         default=True,
         help="Enable task-latent generation via is_both_latent (stage=4/5 requires true).",
     )
+    parser.add_argument(
+        "--bio_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside bio_thinker (TransformerEncoderLayer).",
+    )
+    parser.add_argument(
+        "--task_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside task_thinker (MLP).",
+    )
 
     # GRPO
     parser.add_argument("--num_generations", type=int, default=2)
@@ -756,6 +768,8 @@ def main():
         mol_config=mol_config,
         is_both_latent=use_both_latent,
         is_coconut=False,
+        bio_thinker_dropout=float(args.bio_thinker_dropout),
+        task_thinker_dropout=float(args.task_thinker_dropout),
     )
 
     # 2) Load weights if provided

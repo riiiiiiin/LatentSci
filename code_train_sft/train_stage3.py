@@ -412,6 +412,18 @@ def train_stage3():
         help="Margin alpha for task-latent prompt-alignment cosine hinge loss: mean(max(0, alpha - cos(v_prompt_last, mu_task))).",
     )
     parser.add_argument(
+        "--bio_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside bio_thinker (TransformerEncoderLayer).",
+    )
+    parser.add_argument(
+        "--task_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside task_thinker (MLP).",
+    )
+    parser.add_argument(
         "--max_cot_string_len",
         type=int,
         default=2048,
@@ -451,6 +463,8 @@ def train_stage3():
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
         task_latent_alpha = 0.5
+        bio_thinker_dropout = 0.0
+        task_thinker_dropout = 0.0
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = False
@@ -463,6 +477,8 @@ def train_stage3():
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
         task_latent_alpha = 0.5
+        bio_thinker_dropout = 0.0
+        task_thinker_dropout = 0.0
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = True
@@ -474,6 +490,8 @@ def train_stage3():
         bio_latent_alpha = float(args.bio_latent_alpha)
         task_latent_lambda = float(args.task_latent_lambda)
         task_latent_alpha = float(args.task_latent_alpha)
+        bio_thinker_dropout = float(args.bio_thinker_dropout)
+        task_thinker_dropout = float(args.task_thinker_dropout)
         max_cot_string_len = int(args.max_cot_string_len)
         task_latent_max_steps = int(args.task_latent_max_steps)
         include_cot = True
@@ -503,6 +521,8 @@ def train_stage3():
             bio_latent_alpha=bio_latent_alpha,
             task_latent_lambda=task_latent_lambda,
             task_latent_alpha=task_latent_alpha,
+            bio_thinker_dropout=bio_thinker_dropout,
+            task_thinker_dropout=task_thinker_dropout,
             max_cot_string_len=max_cot_string_len,
             task_latent_max_steps=task_latent_max_steps,
         )

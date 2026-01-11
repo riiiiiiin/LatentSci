@@ -146,7 +146,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class BioThinker(nn.Module):
-    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1, dim_feedforward: Optional[int] = None):
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.0, dim_feedforward: Optional[int] = None):
         super().__init__()
         self.pos = SinusoidalPositionalEncoding(d_model=d_model)
         self.layer = nn.TransformerEncoderLayer(
@@ -192,6 +192,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                  bio_latent_alpha: float = 0.5,
                  task_latent_lambda: float = 0.0,
                  task_latent_alpha: float = 0.5,
+                 bio_thinker_dropout: float = 0.0,
+                 task_thinker_dropout: float = 0.0,
                  max_cot_string_len: int = 2048,
                  task_latent_max_steps: int = 10,
                  torch_dtype=torch.bfloat16):
@@ -219,6 +221,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.bio_latent_alpha = float(bio_latent_alpha)
         self.task_latent_lambda = float(task_latent_lambda)
         self.task_latent_alpha = float(task_latent_alpha)
+        self.bio_thinker_dropout = float(bio_thinker_dropout)
+        self.task_thinker_dropout = float(task_thinker_dropout)
         self.max_cot_string_len = int(max_cot_string_len)
         self.task_latent_max_steps = int(task_latent_max_steps)
 
@@ -294,11 +298,15 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.bio_updater.to(self.model.dtype)
 
         # ---- Stage 3: Bio Thinker (optional) ----
-        self.bio_thinker = BioThinker(d_model=self.d_llm, nhead=self.mol_num_heads)
+        self.bio_thinker = BioThinker(
+            d_model=self.d_llm,
+            nhead=self.mol_num_heads,
+            dropout=self.bio_thinker_dropout,
+        )
         self.bio_thinker.to(self.model.dtype)
 
         # ---- Stage 3: Task Thinker (optional) ----
-        self.task_thinker = TaskThinker(d_model=self.d_llm)
+        self.task_thinker = TaskThinker(d_model=self.d_llm, dropout=self.task_thinker_dropout)
         self.task_thinker.to(self.model.dtype)
 
     # ---- Liger Kernel & Compatibility Helpers ----
