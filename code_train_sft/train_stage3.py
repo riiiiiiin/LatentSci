@@ -153,6 +153,12 @@ class MultiModalSFTTrainer(SFTTrainer):
         # --- Clean forward pass (no perturbation) ---
         outputs_pos = model(**inputs, do_perturb=False)
         loss_pos = outputs_pos.loss
+        ce_loss_pos = getattr(outputs_pos, "ce_loss", None)
+        if ce_loss_pos is None:
+            ce_loss_pos = loss_pos
+        bio_latent_active_pos = bool(getattr(outputs_pos, "bio_latent_active", False))
+        bio_latent_loss_pos = getattr(outputs_pos, "bio_latent_loss", None)
+        bio_latent_loss_scaled_pos = getattr(outputs_pos, "bio_latent_loss_scaled", None)
 
         # Optionally enable counterfactual loss (paired pass)
         do_cf = (
@@ -161,6 +167,29 @@ class MultiModalSFTTrainer(SFTTrainer):
         )
 
         if not do_cf:
+            if getattr(self, "is_world_process_zero", False):
+                step = int(getattr(self.state, "global_step", 0) or 0)
+                log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
+
+                if wandb.run is not None:
+                    log_dict = {
+                        "loss_pos": loss_pos.detach().float().item(),
+                        "ce_loss_pos": ce_loss_pos.detach().float().item(),
+                        "bio_latent_active": 1.0 if bio_latent_active_pos else 0.0,
+                    }
+                    if bio_latent_loss_pos is not None:
+                        log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
+                    if bio_latent_loss_scaled_pos is not None:
+                        log_dict["bio_latent_loss_scaled_pos"] = bio_latent_loss_scaled_pos.detach().float().item()
+                    wandb.log(log_dict)
+
+                if log_every > 0 and (step % log_every == 0):
+                    if getattr(self, "_last_subloss_print_step", None) != step:
+                        self._last_subloss_print_step = step
+                        msg = f"Step {step}: ce_loss={ce_loss_pos.detach().float().item():.4f}"
+                        if bio_latent_active_pos and bio_latent_loss_pos is not None:
+                            msg += f", bio_latent_loss={bio_latent_loss_pos.detach().float().item():.4f}"
+                        logger.info(msg)
             return (loss_pos, outputs_pos) if return_outputs else loss_pos
 
         # --- Corrupted forward pass ---
@@ -170,22 +199,55 @@ class MultiModalSFTTrainer(SFTTrainer):
         unwrapped_model = model.module if hasattr(model, "module") else model
         outputs_cf = unwrapped_model(**inputs, do_perturb=True)
         loss_cf = outputs_cf.loss
+        ce_loss_cf = getattr(outputs_cf, "ce_loss", None)
+        if ce_loss_cf is None:
+            ce_loss_cf = loss_cf
+        bio_latent_active_cf = bool(getattr(outputs_cf, "bio_latent_active", False))
+        bio_latent_loss_cf = getattr(outputs_cf, "bio_latent_loss", None)
+        bio_latent_loss_scaled_cf = getattr(outputs_cf, "bio_latent_loss_scaled", None)
 
         # Hinge on CE gap: enforce L_cf - L_pos >= margin
         gap = loss_cf - loss_pos
         loss_cf_term = F.relu(self.cf_margin - gap)
         loss_total = loss_pos + (self.cf_lambda * loss_cf_term)
 
-        # Logging (avoid duplicated logs in DDP)
-        if getattr(self, "is_world_process_zero", False) and wandb.run is not None:
-            log_dict = {
-                "loss_pos": loss_pos.detach().float().item(),
-                "loss_cf": loss_cf.detach().float().item(),
-                "cf_gap": gap.detach().float().item(),
-                "loss_cf_term": loss_cf_term.detach().float().item(),
-                "loss_total": loss_total.detach().float().item(),
-            }
-            wandb.log(log_dict)
+        if getattr(self, "is_world_process_zero", False):
+            step = int(getattr(self.state, "global_step", 0) or 0)
+            log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
+
+            if wandb.run is not None:
+                log_dict = {
+                    "loss_pos": loss_pos.detach().float().item(),
+                    "loss_cf": loss_cf.detach().float().item(),
+                    "cf_gap": gap.detach().float().item(),
+                    "loss_cf_term": loss_cf_term.detach().float().item(),
+                    "loss_cf_scaled": (self.cf_lambda * loss_cf_term).detach().float().item(),
+                    "loss_total": loss_total.detach().float().item(),
+                    "ce_loss_pos": ce_loss_pos.detach().float().item(),
+                    "ce_loss_cf": ce_loss_cf.detach().float().item(),
+                    "bio_latent_active": 1.0 if (bio_latent_active_pos or bio_latent_active_cf) else 0.0,
+                }
+                if bio_latent_loss_pos is not None:
+                    log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
+                if bio_latent_loss_scaled_pos is not None:
+                    log_dict["bio_latent_loss_scaled_pos"] = bio_latent_loss_scaled_pos.detach().float().item()
+                if bio_latent_loss_cf is not None:
+                    log_dict["bio_latent_loss_cf"] = bio_latent_loss_cf.detach().float().item()
+                if bio_latent_loss_scaled_cf is not None:
+                    log_dict["bio_latent_loss_scaled_cf"] = bio_latent_loss_scaled_cf.detach().float().item()
+                wandb.log(log_dict)
+
+            if log_every > 0 and (step % log_every == 0):
+                if getattr(self, "_last_subloss_print_step", None) != step:
+                    self._last_subloss_print_step = step
+                    msg = (
+                        f"Step {step}: ce_pos={ce_loss_pos.detach().float().item():.4f}, "
+                        f"ce_cf={ce_loss_cf.detach().float().item():.4f}, "
+                        f"cf_term={loss_cf_term.detach().float().item():.4f}"
+                    )
+                    if bio_latent_active_pos and bio_latent_loss_pos is not None:
+                        msg += f", bio_latent_loss_pos={bio_latent_loss_pos.detach().float().item():.4f}"
+                    logger.info(msg)
 
         return (loss_total, outputs_pos) if return_outputs else loss_total
 

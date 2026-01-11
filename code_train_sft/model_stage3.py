@@ -730,7 +730,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 5. Bio latent alignment loss (optional)
         # Loss = avg_i max(0, alpha - cos(v_i, mu_i)), where v_i is detached.
         # =========================================================
-        total_loss = outputs.loss
+        ce_loss = outputs.loss
+        total_loss = ce_loss
+        bio_latent_loss = ce_loss.new_tensor(0.0)
+        bio_latent_loss_scaled = ce_loss.new_tensor(0.0)
+        bio_latent_active = False
+
         if use_bio_thinker and bio_latent_lambda > 0.0 and any(bio_latent_positions_list):
             sample_losses = []
             for b in range(B):
@@ -750,16 +755,22 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
             if sample_losses:
                 bio_latent_loss = torch.stack(sample_losses).mean()
-                scaled = bio_latent_lambda * bio_latent_loss
-                total_loss = total_loss + scaled.to(dtype=total_loss.dtype)
+                bio_latent_loss_scaled = (bio_latent_lambda * bio_latent_loss).to(dtype=total_loss.dtype)
+                total_loss = total_loss + bio_latent_loss_scaled
+                bio_latent_active = True
 
-        return CausalLMOutputWithPast(
+        out = CausalLMOutputWithPast(
             loss=total_loss,
             logits=outputs.logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        out.ce_loss = ce_loss
+        out.bio_latent_loss = bio_latent_loss
+        out.bio_latent_loss_scaled = bio_latent_loss_scaled
+        out.bio_latent_active = bio_latent_active
+        return out
 
     def get_prompt_embeddings(
         self,
