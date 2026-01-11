@@ -150,18 +150,27 @@ class MultiModalSFTTrainer(SFTTrainer):
         
         注意：模型内部已经计算了正确的平均 Loss，这里直接返回即可。
         """
+        def _out_get(outputs, key, default=None):
+            if isinstance(outputs, dict):
+                return outputs.get(key, default)
+            return getattr(outputs, key, default)
+
+        def _is_world_zero():
+            fn = getattr(self, "is_world_process_zero", None)
+            return fn() if callable(fn) else bool(fn)
+
         # --- Clean forward pass (no perturbation) ---
         outputs_pos = model(**inputs, do_perturb=False)
         loss_pos = outputs_pos.loss
-        ce_loss_pos = getattr(outputs_pos, "ce_loss", None)
+        ce_loss_pos = _out_get(outputs_pos, "ce_loss", None)
         if ce_loss_pos is None:
             ce_loss_pos = loss_pos
-        bio_latent_active_pos = bool(getattr(outputs_pos, "bio_latent_active", False))
-        bio_latent_loss_pos = getattr(outputs_pos, "bio_latent_loss", None)
-        bio_latent_loss_scaled_pos = getattr(outputs_pos, "bio_latent_loss_scaled", None)
-        task_latent_active_pos = bool(getattr(outputs_pos, "task_latent_active", False))
-        task_latent_loss_pos = getattr(outputs_pos, "task_latent_loss", None)
-        task_latent_loss_scaled_pos = getattr(outputs_pos, "task_latent_loss_scaled", None)
+        bio_latent_active_pos = bool(_out_get(outputs_pos, "bio_latent_active", False))
+        bio_latent_loss_pos = _out_get(outputs_pos, "bio_latent_loss", None)
+        bio_latent_loss_scaled_pos = _out_get(outputs_pos, "bio_latent_loss_scaled", None)
+        task_latent_active_pos = bool(_out_get(outputs_pos, "task_latent_active", False))
+        task_latent_loss_pos = _out_get(outputs_pos, "task_latent_loss", None)
+        task_latent_loss_scaled_pos = _out_get(outputs_pos, "task_latent_loss_scaled", None)
 
         # Optionally enable counterfactual loss (paired pass)
         do_cf = (
@@ -170,7 +179,7 @@ class MultiModalSFTTrainer(SFTTrainer):
         )
 
         if not do_cf:
-            if getattr(self, "is_world_process_zero", False):
+            if _is_world_zero():
                 step = int(getattr(self.state, "global_step", 0) or 0)
                 log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
 
@@ -209,22 +218,22 @@ class MultiModalSFTTrainer(SFTTrainer):
         unwrapped_model = model.module if hasattr(model, "module") else model
         outputs_cf = unwrapped_model(**inputs, do_perturb=True)
         loss_cf = outputs_cf.loss
-        ce_loss_cf = getattr(outputs_cf, "ce_loss", None)
+        ce_loss_cf = _out_get(outputs_cf, "ce_loss", None)
         if ce_loss_cf is None:
             ce_loss_cf = loss_cf
-        bio_latent_active_cf = bool(getattr(outputs_cf, "bio_latent_active", False))
-        bio_latent_loss_cf = getattr(outputs_cf, "bio_latent_loss", None)
-        bio_latent_loss_scaled_cf = getattr(outputs_cf, "bio_latent_loss_scaled", None)
-        task_latent_active_cf = bool(getattr(outputs_cf, "task_latent_active", False))
-        task_latent_loss_cf = getattr(outputs_cf, "task_latent_loss", None)
-        task_latent_loss_scaled_cf = getattr(outputs_cf, "task_latent_loss_scaled", None)
+        bio_latent_active_cf = bool(_out_get(outputs_cf, "bio_latent_active", False))
+        bio_latent_loss_cf = _out_get(outputs_cf, "bio_latent_loss", None)
+        bio_latent_loss_scaled_cf = _out_get(outputs_cf, "bio_latent_loss_scaled", None)
+        task_latent_active_cf = bool(_out_get(outputs_cf, "task_latent_active", False))
+        task_latent_loss_cf = _out_get(outputs_cf, "task_latent_loss", None)
+        task_latent_loss_scaled_cf = _out_get(outputs_cf, "task_latent_loss_scaled", None)
 
         # Hinge on CE gap: enforce L_cf - L_pos >= margin
         gap = loss_cf - loss_pos
         loss_cf_term = F.relu(self.cf_margin - gap)
         loss_total = loss_pos + (self.cf_lambda * loss_cf_term)
 
-        if getattr(self, "is_world_process_zero", False):
+        if _is_world_zero():
             step = int(getattr(self.state, "global_step", 0) or 0)
             log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
 

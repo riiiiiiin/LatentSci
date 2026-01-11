@@ -814,13 +814,14 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-        out.ce_loss = ce_loss
-        out.bio_latent_loss = bio_latent_loss
-        out.bio_latent_loss_scaled = bio_latent_loss_scaled
-        out.bio_latent_active = bio_latent_active
-        out.task_latent_loss = task_latent_loss
-        out.task_latent_loss_scaled = task_latent_loss_scaled
-        out.task_latent_active = task_latent_active
+        # Store auxiliary losses as ModelOutput dict keys so Accelerate/DDP wrappers keep them.
+        out["ce_loss"] = ce_loss
+        out["bio_latent_loss"] = bio_latent_loss
+        out["bio_latent_loss_scaled"] = bio_latent_loss_scaled
+        out["bio_latent_active"] = bio_latent_active
+        out["task_latent_loss"] = task_latent_loss
+        out["task_latent_loss_scaled"] = task_latent_loss_scaled
+        out["task_latent_active"] = task_latent_active
         return out
 
     def get_prompt_embeddings(
