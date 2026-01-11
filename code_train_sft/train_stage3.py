@@ -240,7 +240,7 @@ def train_stage3():
     parser.add_argument("--lora_path", type=str, default=None, help="Stage 2 LoRA weights (optional)")
     parser.add_argument("--projector_path", type=str, default=None, help="Unified projector + bio_updater weights (optional)")
     parser.add_argument("--output_dir", type=str, default="./outputs/stage3_coconut")
-    parser.add_argument("--epochs_per_stage", type=int, default=3, help="Number of epochs to train (per latent stage or for SFT)")
+    parser.add_argument("--epochs_per_stage", type=float, default=3, help="Number of epochs to train (per latent stage or for SFT)")
     parser.add_argument("--max_latent_stage", type=int, default=3, help="Max number of CoT steps to latent-ize")
     parser.add_argument("--c_thought", type=int, default=2, help="Number of latent tokens per CoT step")
     parser.add_argument("--batch_size", type=int, default=1)

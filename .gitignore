@@ -46,3 +46,8 @@ Thumbs.db
 **/debug*/
 
 code_train_sft/oracle/
+
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda1-bio_latent_alpha01
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda1-bio_latent_alpha03
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda05-bio_latent_alpha01
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda05-bio_latent_alpha03
