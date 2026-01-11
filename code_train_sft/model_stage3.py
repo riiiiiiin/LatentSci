@@ -551,7 +551,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         bio_latent_positions_list = []  # 记录每个 sample 的 bio latent token 索引（绝对位置）
         bio_latent_targets_list = []    # 每个 sample 的 v targets（长度 = #smiles），不参与梯度
         task_latent_positions_list = []  # 每个 sample 的 task latent token 索引（绝对位置，位于 <start_latent> 之后）
-        prompt_last_positions_list = []  # 每个 sample 的 prompt 最后一个 token 在融合序列中的绝对位置（用于 task-latent 对齐）
+        prompt_spans_list = []  # 每个 sample 的 prompt span（融合序列绝对位置，左闭右开），用于 task-latent 对齐
+        bio_thinker_visible_lens_list = []  # 每个 sample 中 bio_thinker 可见前缀长度（用于避免看到 response）
         cursor = 0
 
         for b in range(B):
@@ -596,23 +597,33 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             # 2.2 提取真实文本内容 (通过 Mask 提取非 Padding 部分)
             if attention_mask is not None:
                 non_pad_indices = attention_mask[b].bool()
-                t_emb = text_emb[b][non_pad_indices] # [real_len, d_llm]
-                t_lab = labels[b][non_pad_indices] if labels is not None else None
+                t_emb_all = text_emb[b][non_pad_indices] # [real_len, d_llm]
+                t_lab_all = labels[b][non_pad_indices] if labels is not None else None
+                t_ids_all = input_ids[b][non_pad_indices] if input_ids is not None else None
             else:
-                t_emb = text_emb[b]
-                t_lab = labels[b] if labels is not None else None
+                t_emb_all = text_emb[b]
+                t_lab_all = labels[b] if labels is not None else None
+                t_ids_all = input_ids[b] if input_ids is not None else None
 
-            prompt_last_pos = None
-            if t_lab is not None:
-                non_mask = (t_lab != -100)
+            # Split text into prompt vs response using labels (-100 masks prompt).
+            # For standard SFT: prompt | response(CoT+Answer+EOS)
+            # For coconut SFT: prompt + <latent...> | response(remaining steps + answer)
+            prompt_len = int(t_emb_all.size(0))
+            if t_lab_all is not None:
+                non_mask = (t_lab_all != -100)
                 if non_mask.any():
-                    first_resp = int(non_mask.nonzero(as_tuple=True)[0][0].item())
-                    if first_resp > 0:
-                        prompt_last_text_idx = first_resp - 1
-                        prompt_last_pos = int(mol_part.size(1) + prompt_last_text_idx)
-            prompt_last_positions_list.append(prompt_last_pos)
+                    prompt_len = int(non_mask.nonzero(as_tuple=True)[0][0].item())
+            prompt_emb = t_emb_all[:prompt_len]
+            resp_emb = t_emb_all[prompt_len:]
 
-            # 2.2b 在拼好的后面插入 Bio Latent tokens（数量 = smiles 个数）
+            prompt_span = None
+            if prompt_len > 0:
+                prompt_start = int(mol_part.size(1))
+                prompt_end = int(mol_part.size(1) + prompt_len)
+                prompt_span = (prompt_start, prompt_end)
+            prompt_spans_list.append(prompt_span)
+
+            # 2.2b 在 prompt 和 response 之间插入 Bio Latent tokens（数量 = smiles 个数）
             n_bio_latents = mol_counts[b]
             bio_latent_block = None
             bio_latent_block_len = 0
@@ -622,18 +633,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 bio_latents = bio_latent_emb.expand(1, n_bio_latents, -1)
                 bio_latent_block = torch.cat([start_bio_latent_emb, bio_latents, end_bio_latent_emb], dim=1)
 
-                base_len = mol_part.size(1) + t_emb.size(0)
+                base_len = int(mol_part.size(1) + prompt_emb.size(0))
                 bio_latent_positions = list(range(base_len + 1, base_len + 1 + n_bio_latents))
 
             bio_latent_positions_list.append(bio_latent_positions)
+            bio_thinker_visible_lens_list.append(int(mol_part.size(1) + prompt_emb.size(0) + bio_latent_block_len))
 
-            # 2.2c 在 <end_bio_latent> 之后追加 Task Latent tokens：
+            # 2.2c 在 <end_bio_latent> 之后追加 Task Latent tokens（位于 prompt 与 response 之间）：
             # <start_latent> + N*<latent> + <end_latent>, N = ceil(len(cot)/max_cot_string_len * 4), capped at 4.
             n_task_latents = 0
             task_latent_block = None
             task_latent_block_len = 0
             task_latent_positions = []
-            if use_bio_thinker:
+            # NOTE: Coconut SFT already has <start_latent>/<latent>/<end_latent> in `input_ids`; avoid duplicating.
+            if use_bio_thinker and (not use_coconut):
                 if cot_len is not None:
                     if isinstance(cot_len, torch.Tensor):
                         cot_len_b = int(cot_len[b].detach().cpu().item())
@@ -650,41 +663,53 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 )
                 task_latent_block = torch.cat([start_latent_emb, latent_placeholders, end_latent_emb], dim=1)
 
-                base_len = mol_part.size(1) + t_emb.size(0) + bio_latent_block_len
+                base_len = int(mol_part.size(1) + prompt_emb.size(0) + bio_latent_block_len)
                 task_latent_positions = list(range(base_len + 1, base_len + 1 + n_task_latents))
 
             task_latent_positions_list.append(task_latent_positions)
 
             # 2.3 融合
-            parts = [mol_part, t_emb.unsqueeze(0)]
+            parts = [mol_part, prompt_emb.unsqueeze(0)]
             if bio_latent_block is not None:
                 parts.append(bio_latent_block)
             if task_latent_block is not None:
                 parts.append(task_latent_block)
+            parts.append(resp_emb.unsqueeze(0))
             sample_fused = torch.cat(parts, dim=1)
             
             # 2.4 处理 Labels
-            if t_lab is not None:
-                # 屏蔽 Latent Token 的 CE Loss (在拼接前处理)
-                # 我们不希望模型学习预测 <latent> 这个 ID，而是希望它学习有意义的隐藏状态
-                t_lab_masked = t_lab.clone()
-                is_latent = (input_ids[b][non_pad_indices] == self.latent_id)
-                t_lab_masked[is_latent] = -100
+            if t_lab_all is not None:
+                # Mask any <latent> token IDs coming from text side (coconut SFT); inserted task-latents are handled below.
+                t_lab_masked = t_lab_all.clone()
+                if t_ids_all is not None:
+                    is_latent = (t_ids_all == self.latent_id)
+                    t_lab_masked[is_latent] = -100
 
-                # 分子标记设为 -100 (不计算 Loss)
-                mol_lab = torch.full((1, mol_part.size(1)), -100, device=device, dtype=t_lab.dtype)
-                lab_parts = [mol_lab, t_lab_masked.unsqueeze(0)]
+                prompt_lab = t_lab_masked[:prompt_len]
+                resp_lab = t_lab_masked[prompt_len:]
+
+                # Molecule tokens: always masked
+                mol_lab = torch.full((1, mol_part.size(1)), -100, device=device, dtype=t_lab_masked.dtype)
+                lab_parts = [mol_lab, prompt_lab.unsqueeze(0)]
+
+                # Bio-latent tokens: always masked
                 if bio_latent_block_len > 0:
-                    bio_lab = torch.full((1, bio_latent_block_len), -100, device=device, dtype=t_lab.dtype)
+                    bio_lab = torch.full((1, bio_latent_block_len), -100, device=device, dtype=t_lab_masked.dtype)
                     lab_parts.append(bio_lab)
+
+                # Task-latent tokens: <start_latent> and <latent>* are masked; <end_latent> is supervised.
                 if task_latent_block_len > 0:
                     start_and_latents_lab = torch.full(
-                        (1, 1 + n_task_latents), -100, device=device, dtype=t_lab.dtype
+                        (1, 1 + n_task_latents), -100, device=device, dtype=t_lab_masked.dtype
                     )
                     end_latent_lab = torch.full(
-                        (1, 1), int(self.end_latent_id), device=device, dtype=t_lab.dtype
+                        (1, 1), int(self.end_latent_id), device=device, dtype=t_lab_masked.dtype
                     )
                     lab_parts.extend([start_and_latents_lab, end_latent_lab])
+
+                # Response labels appended after the inserted latent blocks
+                lab_parts.append(resp_lab.unsqueeze(0))
+
                 sample_lab = torch.cat(lab_parts, dim=1)
                 fused_labels_list.append(sample_lab)
             
@@ -709,7 +734,17 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
         # =========================================================
         if use_bio_thinker and any(bio_latent_positions_list):
-            thinker_out = self.bio_thinker(final_embeds, attention_mask=final_attn_mask)
+            # IMPORTANT: BioThinker is a bidirectional (encoder) block; it must NOT see teacher-forced response tokens.
+            # We mask everything after the end of the bio-latent block as padding for BioThinker.
+            bio_thinker_mask = torch.zeros_like(final_attn_mask)
+            for b in range(B):
+                curr_L = int(final_attn_mask[b].sum().item())
+                vis_L = int(bio_thinker_visible_lens_list[b]) if b < len(bio_thinker_visible_lens_list) else curr_L
+                vis_L = max(0, min(vis_L, curr_L))
+                if vis_L > 0:
+                    bio_thinker_mask[b, :vis_L] = 1
+
+            thinker_out = self.bio_thinker(final_embeds, attention_mask=bio_thinker_mask)
             for b in range(B):
                 positions = bio_latent_positions_list[b]
                 if positions:
@@ -803,7 +838,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         # =========================================================
         # 6. Task latent prompt-alignment loss (optional)
-        # Loss = avg_i max(0, alpha - cos(v_prompt_last, mu_task_i)), where v is detached.
+        # Loss = avg_i max(0, alpha - cos(v_prompt_mean, mu_task_i)), where v is detached.
         # =========================================================
         if use_bio_thinker and task_latent_lambda > 0.0 and any(task_latent_positions_list):
             sample_losses = []
@@ -811,12 +846,15 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 positions = task_latent_positions_list[b]
                 if not positions:
                     continue
-                prompt_last_pos = prompt_last_positions_list[b]
-                if prompt_last_pos is None:
+                prompt_span = prompt_spans_list[b]
+                if prompt_span is None:
                     continue
 
                 mu = model_input_embeds[b, positions].float()
-                v = model_input_embeds[b, int(prompt_last_pos)].float().detach()
+                p_start, p_end = prompt_span
+                if p_end <= p_start:
+                    continue
+                v = model_input_embeds[b, p_start:p_end].float().detach().mean(dim=0)
                 cos_sim = F.cosine_similarity(mu, v.unsqueeze(0).expand_as(mu), dim=-1)
                 alpha = mu.new_tensor(task_latent_alpha)
                 sample_losses.append(F.relu(alpha - cos_sim).mean())
@@ -974,7 +1012,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             parts = [mol_part, t_emb.unsqueeze(0)]
             if bio_latent_block is not None:
                 parts.append(bio_latent_block)
-            if use_bio_thinker:
+            # NOTE: Coconut mode already includes <start_latent>/<latent>/<end_latent> in `input_ids`.
+            if use_bio_thinker and (not use_coconut):
                 parts.append(start_latent_emb)
             fused_samples_list.append(torch.cat(parts, dim=1))
 
@@ -997,7 +1036,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
         # =========================================================
         if use_bio_thinker and any(bio_latent_positions_list):
-            thinker_out = self.bio_thinker(prompt_embeds, attention_mask=prompt_attn_mask)
+            # IMPORTANT: BioThinker is bidirectional; mask out the trailing <start_latent> token so it can't
+            # (even trivially) influence bio-latent embeddings.
+            bio_thinker_mask = prompt_attn_mask.clone()
+            for b in range(B):
+                curr_L = int(fused_samples_list[b].size(1))
+                if curr_L <= 0:
+                    continue
+                if not use_coconut:
+                    # When `use_bio_thinker` is enabled (non-coconut), each sample ends with an appended <start_latent>.
+                    start_latent_pos = int(diffs[b] + curr_L - 1)
+                    if 0 <= start_latent_pos < bio_thinker_mask.size(1):
+                        bio_thinker_mask[b, start_latent_pos] = 0
+
+            thinker_out = self.bio_thinker(prompt_embeds, attention_mask=bio_thinker_mask)
             for b in range(B):
                 positions = bio_latent_positions_list[b]
                 if positions:
@@ -1032,7 +1084,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # Each step: decode next token; if <end_latent> then append and stop,
         # otherwise append a new latent embedding (from hidden state) refined by TaskThinker.
         # =========================================================
-        if use_bio_thinker:
+        # NOTE: Coconut mode already uses <start_latent>/<latent>/<end_latent> in `input_ids`; avoid duplicating.
+        if use_bio_thinker and (not use_coconut):
             llm = self._get_actual_llm()
             backbone = llm.model
             # has_lora_in_backbone = any(hasattr(m, "lora_A") and hasattr(m, "lora_B") for m in backbone.modules())
