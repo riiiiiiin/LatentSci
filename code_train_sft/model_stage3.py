@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+from dataclasses import dataclass
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import sys
@@ -15,6 +16,17 @@ from smi_ted_light.loadnew import load_smi_ted
 import torch.nn.functional as F
 from transformers.generation.utils import GenerationConfig
 from typing import Optional, List
+
+
+@dataclass
+class BioLatentCausalLMOutputWithPast(CausalLMOutputWithPast):
+    ce_loss: Optional[torch.Tensor] = None
+    bio_latent_loss: Optional[torch.Tensor] = None
+    bio_latent_loss_scaled: Optional[torch.Tensor] = None
+    bio_latent_active: Optional[bool] = None
+    task_latent_loss: Optional[torch.Tensor] = None
+    task_latent_loss_scaled: Optional[torch.Tensor] = None
+    task_latent_active: Optional[bool] = None
 
 
 # ============================
@@ -815,21 +827,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 total_loss = total_loss + task_latent_loss_scaled
                 task_latent_active = True
 
-        out = CausalLMOutputWithPast(
+        out = BioLatentCausalLMOutputWithPast(
             loss=total_loss,
             logits=outputs.logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            ce_loss=ce_loss,
+            bio_latent_loss=bio_latent_loss,
+            bio_latent_loss_scaled=bio_latent_loss_scaled,
+            bio_latent_active=bio_latent_active,
+            task_latent_loss=task_latent_loss,
+            task_latent_loss_scaled=task_latent_loss_scaled,
+            task_latent_active=task_latent_active,
         )
-        # Store auxiliary losses as ModelOutput dict keys so Accelerate/DDP wrappers keep them.
-        out["ce_loss"] = ce_loss
-        out["bio_latent_loss"] = bio_latent_loss
-        out["bio_latent_loss_scaled"] = bio_latent_loss_scaled
-        out["bio_latent_active"] = bio_latent_active
-        out["task_latent_loss"] = task_latent_loss
-        out["task_latent_loss_scaled"] = task_latent_loss_scaled
-        out["task_latent_active"] = task_latent_active
         return out
 
     def get_prompt_embeddings(
