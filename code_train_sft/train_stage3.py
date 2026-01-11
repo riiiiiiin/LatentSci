@@ -159,6 +159,9 @@ class MultiModalSFTTrainer(SFTTrainer):
         bio_latent_active_pos = bool(getattr(outputs_pos, "bio_latent_active", False))
         bio_latent_loss_pos = getattr(outputs_pos, "bio_latent_loss", None)
         bio_latent_loss_scaled_pos = getattr(outputs_pos, "bio_latent_loss_scaled", None)
+        task_latent_active_pos = bool(getattr(outputs_pos, "task_latent_active", False))
+        task_latent_loss_pos = getattr(outputs_pos, "task_latent_loss", None)
+        task_latent_loss_scaled_pos = getattr(outputs_pos, "task_latent_loss_scaled", None)
 
         # Optionally enable counterfactual loss (paired pass)
         do_cf = (
@@ -176,11 +179,16 @@ class MultiModalSFTTrainer(SFTTrainer):
                         "loss_pos": loss_pos.detach().float().item(),
                         "ce_loss_pos": ce_loss_pos.detach().float().item(),
                         "bio_latent_active": 1.0 if bio_latent_active_pos else 0.0,
+                        "task_latent_active": 1.0 if task_latent_active_pos else 0.0,
                     }
                     if bio_latent_loss_pos is not None:
                         log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
                     if bio_latent_loss_scaled_pos is not None:
                         log_dict["bio_latent_loss_scaled_pos"] = bio_latent_loss_scaled_pos.detach().float().item()
+                    if task_latent_loss_pos is not None:
+                        log_dict["task_latent_loss_pos"] = task_latent_loss_pos.detach().float().item()
+                    if task_latent_loss_scaled_pos is not None:
+                        log_dict["task_latent_loss_scaled_pos"] = task_latent_loss_scaled_pos.detach().float().item()
                     wandb.log(log_dict)
 
                 if log_every > 0 and (step % log_every == 0):
@@ -189,6 +197,8 @@ class MultiModalSFTTrainer(SFTTrainer):
                         msg = f"Step {step}: ce_loss={ce_loss_pos.detach().float().item():.4f}"
                         if bio_latent_active_pos and bio_latent_loss_pos is not None:
                             msg += f", bio_latent_loss={bio_latent_loss_pos.detach().float().item():.4f}"
+                        if task_latent_active_pos and task_latent_loss_pos is not None:
+                            msg += f", task_latent_loss={task_latent_loss_pos.detach().float().item():.4f}"
                         logger.info(msg)
             return (loss_pos, outputs_pos) if return_outputs else loss_pos
 
@@ -205,6 +215,9 @@ class MultiModalSFTTrainer(SFTTrainer):
         bio_latent_active_cf = bool(getattr(outputs_cf, "bio_latent_active", False))
         bio_latent_loss_cf = getattr(outputs_cf, "bio_latent_loss", None)
         bio_latent_loss_scaled_cf = getattr(outputs_cf, "bio_latent_loss_scaled", None)
+        task_latent_active_cf = bool(getattr(outputs_cf, "task_latent_active", False))
+        task_latent_loss_cf = getattr(outputs_cf, "task_latent_loss", None)
+        task_latent_loss_scaled_cf = getattr(outputs_cf, "task_latent_loss_scaled", None)
 
         # Hinge on CE gap: enforce L_cf - L_pos >= margin
         gap = loss_cf - loss_pos
@@ -226,6 +239,7 @@ class MultiModalSFTTrainer(SFTTrainer):
                     "ce_loss_pos": ce_loss_pos.detach().float().item(),
                     "ce_loss_cf": ce_loss_cf.detach().float().item(),
                     "bio_latent_active": 1.0 if (bio_latent_active_pos or bio_latent_active_cf) else 0.0,
+                    "task_latent_active": 1.0 if (task_latent_active_pos or task_latent_active_cf) else 0.0,
                 }
                 if bio_latent_loss_pos is not None:
                     log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
@@ -235,6 +249,14 @@ class MultiModalSFTTrainer(SFTTrainer):
                     log_dict["bio_latent_loss_cf"] = bio_latent_loss_cf.detach().float().item()
                 if bio_latent_loss_scaled_cf is not None:
                     log_dict["bio_latent_loss_scaled_cf"] = bio_latent_loss_scaled_cf.detach().float().item()
+                if task_latent_loss_pos is not None:
+                    log_dict["task_latent_loss_pos"] = task_latent_loss_pos.detach().float().item()
+                if task_latent_loss_scaled_pos is not None:
+                    log_dict["task_latent_loss_scaled_pos"] = task_latent_loss_scaled_pos.detach().float().item()
+                if task_latent_loss_cf is not None:
+                    log_dict["task_latent_loss_cf"] = task_latent_loss_cf.detach().float().item()
+                if task_latent_loss_scaled_cf is not None:
+                    log_dict["task_latent_loss_scaled_cf"] = task_latent_loss_scaled_cf.detach().float().item()
                 wandb.log(log_dict)
 
             if log_every > 0 and (step % log_every == 0):
@@ -247,6 +269,8 @@ class MultiModalSFTTrainer(SFTTrainer):
                     )
                     if bio_latent_active_pos and bio_latent_loss_pos is not None:
                         msg += f", bio_latent_loss_pos={bio_latent_loss_pos.detach().float().item():.4f}"
+                    if task_latent_active_pos and task_latent_loss_pos is not None:
+                        msg += f", task_latent_loss_pos={task_latent_loss_pos.detach().float().item():.4f}"
                     logger.info(msg)
 
         return (loss_total, outputs_pos) if return_outputs else loss_total
@@ -367,6 +391,18 @@ def train_stage3():
         help="Margin alpha for bio-latent cosine hinge loss: mean(max(0, alpha - cos(v, mu))).",
     )
     parser.add_argument(
+        "--task_latent_lambda",
+        type=float,
+        default=0.0,
+        help="Weight for task-latent prompt-alignment cosine hinge loss (only effective when --training_stage 3 and --is_both_latent true).",
+    )
+    parser.add_argument(
+        "--task_latent_alpha",
+        type=float,
+        default=0.5,
+        help="Margin alpha for task-latent prompt-alignment cosine hinge loss: mean(max(0, alpha - cos(v_prompt_last, mu_task))).",
+    )
+    parser.add_argument(
         "--max_cot_string_len",
         type=int,
         default=2048,
@@ -404,6 +440,8 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        task_latent_lambda = 0.0
+        task_latent_alpha = 0.5
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = False
@@ -414,6 +452,8 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        task_latent_lambda = 0.0
+        task_latent_alpha = 0.5
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = True
@@ -423,6 +463,8 @@ def train_stage3():
         is_both_latent = bool(args.is_both_latent)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
+        task_latent_lambda = float(args.task_latent_lambda)
+        task_latent_alpha = float(args.task_latent_alpha)
         max_cot_string_len = int(args.max_cot_string_len)
         task_latent_max_steps = int(args.task_latent_max_steps)
         include_cot = True
@@ -450,6 +492,8 @@ def train_stage3():
             is_both_latent=is_both_latent,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
+            task_latent_lambda=task_latent_lambda,
+            task_latent_alpha=task_latent_alpha,
             max_cot_string_len=max_cot_string_len,
             task_latent_max_steps=task_latent_max_steps,
         )

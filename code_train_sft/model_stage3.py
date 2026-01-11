@@ -190,6 +190,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                  is_both_latent: bool = False,
                  bio_latent_lambda: float = 0.0,
                  bio_latent_alpha: float = 0.5,
+                 task_latent_lambda: float = 0.0,
+                 task_latent_alpha: float = 0.5,
                  max_cot_string_len: int = 2048,
                  task_latent_max_steps: int = 10,
                  torch_dtype=torch.bfloat16):
@@ -215,6 +217,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.is_both_latent = bool(is_both_latent)
         self.bio_latent_lambda = float(bio_latent_lambda)
         self.bio_latent_alpha = float(bio_latent_alpha)
+        self.task_latent_lambda = float(task_latent_lambda)
+        self.task_latent_alpha = float(task_latent_alpha)
         self.max_cot_string_len = int(max_cot_string_len)
         self.task_latent_max_steps = int(task_latent_max_steps)
 
@@ -460,6 +464,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         use_bio_thinker = bool(kwargs.pop("is_both_latent", self.is_both_latent))
         bio_latent_lambda = float(kwargs.pop("bio_latent_lambda", self.bio_latent_lambda))
         bio_latent_alpha = float(kwargs.pop("bio_latent_alpha", self.bio_latent_alpha))
+        task_latent_lambda = float(kwargs.pop("task_latent_lambda", self.task_latent_lambda))
+        task_latent_alpha = float(kwargs.pop("task_latent_alpha", self.task_latent_alpha))
         cot_len = kwargs.pop("cot_len", None)
         max_cot_string_len = int(kwargs.pop("max_cot_string_len", self.max_cot_string_len))
 
@@ -525,6 +531,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         bio_latent_positions_list = []  # 记录每个 sample 的 bio latent token 索引（绝对位置）
         bio_latent_targets_list = []    # 每个 sample 的 v targets（长度 = #smiles），不参与梯度
         task_latent_positions_list = []  # 每个 sample 的 task latent token 索引（绝对位置，位于 <start_latent> 之后）
+        prompt_last_positions_list = []  # 每个 sample 的 prompt 最后一个 token 在融合序列中的绝对位置（用于 task-latent 对齐）
         cursor = 0
 
         for b in range(B):
@@ -574,6 +581,16 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             else:
                 t_emb = text_emb[b]
                 t_lab = labels[b] if labels is not None else None
+
+            prompt_last_pos = None
+            if t_lab is not None:
+                non_mask = (t_lab != -100)
+                if non_mask.any():
+                    first_resp = int(non_mask.nonzero(as_tuple=True)[0][0].item())
+                    if first_resp > 0:
+                        prompt_last_text_idx = first_resp - 1
+                        prompt_last_pos = int(mol_part.size(1) + prompt_last_text_idx)
+            prompt_last_positions_list.append(prompt_last_pos)
 
             # 2.2b 在拼好的后面插入 Bio Latent tokens（数量 = smiles 个数）
             n_bio_latents = mol_counts[b]
@@ -732,9 +749,14 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         ce_loss = outputs.loss
         total_loss = ce_loss
+
         bio_latent_loss = ce_loss.new_tensor(0.0)
         bio_latent_loss_scaled = ce_loss.new_tensor(0.0)
         bio_latent_active = False
+
+        task_latent_loss = ce_loss.new_tensor(0.0)
+        task_latent_loss_scaled = ce_loss.new_tensor(0.0)
+        task_latent_active = False
 
         if use_bio_thinker and bio_latent_lambda > 0.0 and any(bio_latent_positions_list):
             sample_losses = []
@@ -759,6 +781,32 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 total_loss = total_loss + bio_latent_loss_scaled
                 bio_latent_active = True
 
+        # =========================================================
+        # 6. Task latent prompt-alignment loss (optional)
+        # Loss = avg_i max(0, alpha - cos(v_prompt_last, mu_task_i)), where v is detached.
+        # =========================================================
+        if use_bio_thinker and task_latent_lambda > 0.0 and any(task_latent_positions_list):
+            sample_losses = []
+            for b in range(B):
+                positions = task_latent_positions_list[b]
+                if not positions:
+                    continue
+                prompt_last_pos = prompt_last_positions_list[b]
+                if prompt_last_pos is None:
+                    continue
+
+                mu = model_input_embeds[b, positions].float()
+                v = model_input_embeds[b, int(prompt_last_pos)].float().detach()
+                cos_sim = F.cosine_similarity(mu, v.unsqueeze(0).expand_as(mu), dim=-1)
+                alpha = mu.new_tensor(task_latent_alpha)
+                sample_losses.append(F.relu(alpha - cos_sim).mean())
+
+            if sample_losses:
+                task_latent_loss = torch.stack(sample_losses).mean()
+                task_latent_loss_scaled = (task_latent_lambda * task_latent_loss).to(dtype=total_loss.dtype)
+                total_loss = total_loss + task_latent_loss_scaled
+                task_latent_active = True
+
         out = CausalLMOutputWithPast(
             loss=total_loss,
             logits=outputs.logits,
@@ -770,6 +818,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         out.bio_latent_loss = bio_latent_loss
         out.bio_latent_loss_scaled = bio_latent_loss_scaled
         out.bio_latent_active = bio_latent_active
+        out.task_latent_loss = task_latent_loss
+        out.task_latent_loss_scaled = task_latent_loss_scaled
+        out.task_latent_active = task_latent_active
         return out
 
     def get_prompt_embeddings(
