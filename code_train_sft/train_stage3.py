@@ -339,7 +339,7 @@ def train_stage3():
     parser.add_argument("--max_latent_stage", type=int, default=3, help="Max number of CoT steps to latent-ize")
     parser.add_argument("--c_thought", type=int, default=2, help="Number of latent tokens per CoT step")
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--grad_accum", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
@@ -378,7 +378,7 @@ def train_stage3():
     parser.add_argument(
         "--is_coconut",
         type=lambda x: (str(x).lower() == "true"),
-        default=True,
+        default=False,
         help="Whether to run Coconut latent training for stage 3 (ignored for stage 1/2).",
     )
     parser.add_argument(
