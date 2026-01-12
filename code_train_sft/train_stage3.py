@@ -150,9 +150,27 @@ class MultiModalSFTTrainer(SFTTrainer):
         
         注意：模型内部已经计算了正确的平均 Loss，这里直接返回即可。
         """
+        def _out_get(outputs, key, default=None):
+            if isinstance(outputs, dict):
+                return outputs.get(key, default)
+            return getattr(outputs, key, default)
+
+        def _is_world_zero():
+            fn = getattr(self, "is_world_process_zero", None)
+            return fn() if callable(fn) else bool(fn)
+
         # --- Clean forward pass (no perturbation) ---
         outputs_pos = model(**inputs, do_perturb=False)
         loss_pos = outputs_pos.loss
+        ce_loss_pos = _out_get(outputs_pos, "ce_loss", None)
+        if ce_loss_pos is None:
+            ce_loss_pos = loss_pos
+        bio_latent_active_pos = bool(_out_get(outputs_pos, "bio_latent_active", False))
+        bio_latent_loss_pos = _out_get(outputs_pos, "bio_latent_loss", None)
+        bio_latent_loss_scaled_pos = _out_get(outputs_pos, "bio_latent_loss_scaled", None)
+        task_latent_active_pos = bool(_out_get(outputs_pos, "task_latent_active", False))
+        task_latent_loss_pos = _out_get(outputs_pos, "task_latent_loss", None)
+        task_latent_loss_scaled_pos = _out_get(outputs_pos, "task_latent_loss_scaled", None)
 
         # Optionally enable counterfactual loss (paired pass)
         do_cf = (
@@ -161,6 +179,36 @@ class MultiModalSFTTrainer(SFTTrainer):
         )
 
         if not do_cf:
+            if _is_world_zero():
+                step = int(getattr(self.state, "global_step", 0) or 0)
+                log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
+
+                if wandb.run is not None:
+                    log_dict = {
+                        "loss_pos": loss_pos.detach().float().item(),
+                        "ce_loss_pos": ce_loss_pos.detach().float().item(),
+                        "bio_latent_active": 1.0 if bio_latent_active_pos else 0.0,
+                        "task_latent_active": 1.0 if task_latent_active_pos else 0.0,
+                    }
+                    if bio_latent_loss_pos is not None:
+                        log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
+                    if bio_latent_loss_scaled_pos is not None:
+                        log_dict["bio_latent_loss_scaled_pos"] = bio_latent_loss_scaled_pos.detach().float().item()
+                    if task_latent_loss_pos is not None:
+                        log_dict["task_latent_loss_pos"] = task_latent_loss_pos.detach().float().item()
+                    if task_latent_loss_scaled_pos is not None:
+                        log_dict["task_latent_loss_scaled_pos"] = task_latent_loss_scaled_pos.detach().float().item()
+                    wandb.log(log_dict)
+
+                if log_every > 0 and (step % log_every == 0):
+                    if getattr(self, "_last_subloss_print_step", None) != step:
+                        self._last_subloss_print_step = step
+                        msg = f"Step {step}: ce_loss={ce_loss_pos.detach().float().item():.4f}"
+                        if bio_latent_active_pos and bio_latent_loss_pos is not None:
+                            msg += f", bio_latent_loss={bio_latent_loss_pos.detach().float().item():.4f}"
+                        if task_latent_active_pos and task_latent_loss_pos is not None:
+                            msg += f", task_latent_loss={task_latent_loss_pos.detach().float().item():.4f}"
+                        logger.info(msg)
             return (loss_pos, outputs_pos) if return_outputs else loss_pos
 
         # --- Corrupted forward pass ---
@@ -170,22 +218,69 @@ class MultiModalSFTTrainer(SFTTrainer):
         unwrapped_model = model.module if hasattr(model, "module") else model
         outputs_cf = unwrapped_model(**inputs, do_perturb=True)
         loss_cf = outputs_cf.loss
+        ce_loss_cf = _out_get(outputs_cf, "ce_loss", None)
+        if ce_loss_cf is None:
+            ce_loss_cf = loss_cf
+        bio_latent_active_cf = bool(_out_get(outputs_cf, "bio_latent_active", False))
+        bio_latent_loss_cf = _out_get(outputs_cf, "bio_latent_loss", None)
+        bio_latent_loss_scaled_cf = _out_get(outputs_cf, "bio_latent_loss_scaled", None)
+        task_latent_active_cf = bool(_out_get(outputs_cf, "task_latent_active", False))
+        task_latent_loss_cf = _out_get(outputs_cf, "task_latent_loss", None)
+        task_latent_loss_scaled_cf = _out_get(outputs_cf, "task_latent_loss_scaled", None)
 
         # Hinge on CE gap: enforce L_cf - L_pos >= margin
         gap = loss_cf - loss_pos
         loss_cf_term = F.relu(self.cf_margin - gap)
         loss_total = loss_pos + (self.cf_lambda * loss_cf_term)
 
-        # Logging (avoid duplicated logs in DDP)
-        if getattr(self, "is_world_process_zero", False) and wandb.run is not None:
-            log_dict = {
-                "loss_pos": loss_pos.detach().float().item(),
-                "loss_cf": loss_cf.detach().float().item(),
-                "cf_gap": gap.detach().float().item(),
-                "loss_cf_term": loss_cf_term.detach().float().item(),
-                "loss_total": loss_total.detach().float().item(),
-            }
-            wandb.log(log_dict)
+        if _is_world_zero():
+            step = int(getattr(self.state, "global_step", 0) or 0)
+            log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
+
+            if wandb.run is not None:
+                log_dict = {
+                    "loss_pos": loss_pos.detach().float().item(),
+                    "loss_cf": loss_cf.detach().float().item(),
+                    "cf_gap": gap.detach().float().item(),
+                    "loss_cf_term": loss_cf_term.detach().float().item(),
+                    "loss_cf_scaled": (self.cf_lambda * loss_cf_term).detach().float().item(),
+                    "loss_total": loss_total.detach().float().item(),
+                    "ce_loss_pos": ce_loss_pos.detach().float().item(),
+                    "ce_loss_cf": ce_loss_cf.detach().float().item(),
+                    "bio_latent_active": 1.0 if (bio_latent_active_pos or bio_latent_active_cf) else 0.0,
+                    "task_latent_active": 1.0 if (task_latent_active_pos or task_latent_active_cf) else 0.0,
+                }
+                if bio_latent_loss_pos is not None:
+                    log_dict["bio_latent_loss_pos"] = bio_latent_loss_pos.detach().float().item()
+                if bio_latent_loss_scaled_pos is not None:
+                    log_dict["bio_latent_loss_scaled_pos"] = bio_latent_loss_scaled_pos.detach().float().item()
+                if bio_latent_loss_cf is not None:
+                    log_dict["bio_latent_loss_cf"] = bio_latent_loss_cf.detach().float().item()
+                if bio_latent_loss_scaled_cf is not None:
+                    log_dict["bio_latent_loss_scaled_cf"] = bio_latent_loss_scaled_cf.detach().float().item()
+                if task_latent_loss_pos is not None:
+                    log_dict["task_latent_loss_pos"] = task_latent_loss_pos.detach().float().item()
+                if task_latent_loss_scaled_pos is not None:
+                    log_dict["task_latent_loss_scaled_pos"] = task_latent_loss_scaled_pos.detach().float().item()
+                if task_latent_loss_cf is not None:
+                    log_dict["task_latent_loss_cf"] = task_latent_loss_cf.detach().float().item()
+                if task_latent_loss_scaled_cf is not None:
+                    log_dict["task_latent_loss_scaled_cf"] = task_latent_loss_scaled_cf.detach().float().item()
+                wandb.log(log_dict)
+
+            if log_every > 0 and (step % log_every == 0):
+                if getattr(self, "_last_subloss_print_step", None) != step:
+                    self._last_subloss_print_step = step
+                    msg = (
+                        f"Step {step}: ce_pos={ce_loss_pos.detach().float().item():.4f}, "
+                        f"ce_cf={ce_loss_cf.detach().float().item():.4f}, "
+                        f"cf_term={loss_cf_term.detach().float().item():.4f}"
+                    )
+                    if bio_latent_active_pos and bio_latent_loss_pos is not None:
+                        msg += f", bio_latent_loss_pos={bio_latent_loss_pos.detach().float().item():.4f}"
+                    if task_latent_active_pos and task_latent_loss_pos is not None:
+                        msg += f", task_latent_loss_pos={task_latent_loss_pos.detach().float().item():.4f}"
+                    logger.info(msg)
 
         return (loss_total, outputs_pos) if return_outputs else loss_total
 
@@ -240,7 +335,7 @@ def train_stage3():
     parser.add_argument("--lora_path", type=str, default=None, help="Stage 2 LoRA weights (optional)")
     parser.add_argument("--projector_path", type=str, default=None, help="Unified projector + bio_updater weights (optional)")
     parser.add_argument("--output_dir", type=str, default="./outputs/stage3_coconut")
-    parser.add_argument("--epochs_per_stage", type=int, default=3, help="Number of epochs to train (per latent stage or for SFT)")
+    parser.add_argument("--epochs_per_stage", type=float, default=3, help="Number of epochs to train (per latent stage or for SFT)")
     parser.add_argument("--max_latent_stage", type=int, default=3, help="Max number of CoT steps to latent-ize")
     parser.add_argument("--c_thought", type=int, default=2, help="Number of latent tokens per CoT step")
     parser.add_argument("--batch_size", type=int, default=1)
@@ -249,6 +344,36 @@ def train_stage3():
     parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
     parser.add_argument("--training_stage", type=int, default=3, choices=[1, 2, 3], help="Which stage to train: 1 (No COT), 2 (With COT), 3 (Latent/Coconut)")
+    parser.add_argument(
+        "--freeze_llm",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the text LLM weights (including any loaded LoRA adapters).",
+    )
+    parser.add_argument(
+        "--freeze_projector",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the multi-modal projector module.",
+    )
+    parser.add_argument(
+        "--freeze_bio_updater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater module (memory update).",
+    )
+    parser.add_argument(
+        "--freeze_bio_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_thinker module.",
+    )
+    parser.add_argument(
+        "--freeze_task_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the task_thinker module.",
+    )
     # Stage 3 switches (only effective when --training_stage 3)
     parser.add_argument(
         "--is_coconut",
@@ -273,6 +398,30 @@ def train_stage3():
         type=float,
         default=0.5,
         help="Margin alpha for bio-latent cosine hinge loss: mean(max(0, alpha - cos(v, mu))).",
+    )
+    parser.add_argument(
+        "--task_latent_lambda",
+        type=float,
+        default=0.0,
+        help="Weight for task-latent prompt-alignment cosine hinge loss (only effective when --training_stage 3 and --is_both_latent true).",
+    )
+    parser.add_argument(
+        "--task_latent_alpha",
+        type=float,
+        default=0.5,
+        help="Margin alpha for task-latent prompt-alignment cosine hinge loss: mean(max(0, alpha - cos(v_prompt_last, mu_task))).",
+    )
+    parser.add_argument(
+        "--bio_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside bio_thinker (TransformerEncoderLayer).",
+    )
+    parser.add_argument(
+        "--task_thinker_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability inside task_thinker (MLP).",
     )
     parser.add_argument(
         "--max_cot_string_len",
@@ -312,6 +461,10 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        task_latent_lambda = 0.0
+        task_latent_alpha = 0.5
+        bio_thinker_dropout = 0.0
+        task_thinker_dropout = 0.0
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = False
@@ -322,6 +475,10 @@ def train_stage3():
         is_both_latent = False
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
+        task_latent_lambda = 0.0
+        task_latent_alpha = 0.5
+        bio_thinker_dropout = 0.0
+        task_thinker_dropout = 0.0
         max_cot_string_len = 2048
         task_latent_max_steps = 10
         include_cot = True
@@ -331,6 +488,10 @@ def train_stage3():
         is_both_latent = bool(args.is_both_latent)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
+        task_latent_lambda = float(args.task_latent_lambda)
+        task_latent_alpha = float(args.task_latent_alpha)
+        bio_thinker_dropout = float(args.bio_thinker_dropout)
+        task_thinker_dropout = float(args.task_thinker_dropout)
         max_cot_string_len = int(args.max_cot_string_len)
         task_latent_max_steps = int(args.task_latent_max_steps)
         include_cot = True
@@ -358,6 +519,10 @@ def train_stage3():
             is_both_latent=is_both_latent,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
+            task_latent_lambda=task_latent_lambda,
+            task_latent_alpha=task_latent_alpha,
+            bio_thinker_dropout=bio_thinker_dropout,
+            task_thinker_dropout=task_thinker_dropout,
             max_cot_string_len=max_cot_string_len,
             task_latent_max_steps=task_latent_max_steps,
         )
@@ -388,20 +553,25 @@ def train_stage3():
                 bias="none",
             )
             model.model = get_peft_model(model.model, lora_config)
+
+        if bool(args.freeze_llm):
+            for param in model.model.parameters():
+                param.requires_grad = False
+            logger.info("freeze_llm=True: froze all LLM (base + LoRA) parameters.")
         
         # 确保投影器和 Bio Updater 可训练
         for param in model.projector.parameters():
-            param.requires_grad = True
+            param.requires_grad = not bool(args.freeze_projector)
         
         for param in model.bio_updater.parameters():
-            param.requires_grad = True
+            param.requires_grad = not bool(args.freeze_bio_updater)
 
         if hasattr(model, "bio_thinker"):
             for param in model.bio_thinker.parameters():
-                param.requires_grad = bool(is_both_latent)
+                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_bio_thinker))
         if hasattr(model, "task_thinker"):
             for param in model.task_thinker.parameters():
-                param.requires_grad = bool(is_both_latent)
+                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_task_thinker))
         
         model.model.train()
 

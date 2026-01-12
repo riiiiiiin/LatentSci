@@ -403,7 +403,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         self._current_smiles = self._extract_smiles_from_inputs(inputs)
         self._current_task_latent_count = None
 
-        if self.training_stage == 4:
+        if self.training_stage in (4, 5):
             step = int(getattr(self.state, "global_step", 0) or 0)
             seed = int(getattr(self.args, "seed", 0) or 0) if self.args is not None else 0
             flags: list[bool] = []
@@ -420,7 +420,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         output["smiles"] = self._current_smiles
 
         # Stage 4: thread corruption flags + latent counts to loss computation, and mask out corrupted-but-wrong samples.
-        if self.training_stage == 4 and self._current_corrupt_task_latents is not None:
+        if self.training_stage in (4, 5) and self._current_corrupt_task_latents is not None:
             device = output["prompt_ids"].device
             output["corrupt_task_latents"] = torch.tensor(
                 self._current_corrupt_task_latents, device=device, dtype=torch.bool
@@ -497,7 +497,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 torch.distributed.all_gather_object(gathered_smiles, smiles, group=self.tp_group)
                 all_smiles = [s for sub in gathered_smiles for s in sub]
 
-                if self.training_stage == 4:
+                if self.training_stage in (4, 5):
                     gathered_corrupt = [None for _ in range(self.vllm_tensor_parallel_size)]
                     torch.distributed.all_gather_object(gathered_corrupt, self._current_corrupt_task_latents, group=self.tp_group)
                     all_corrupt = [bool(x) for sub in gathered_corrupt for x in (sub or [])]
@@ -555,7 +555,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
 
             prompt_ids_list = [p[m].tolist() for p, m in zip(prompt_ids, prompt_mask.bool())]
             logprobs = None
-            if self.training_stage == 4:
+            if self.training_stage in (4, 5):
                 self._current_task_latent_count = [int(x) for x in (latent_counts or [0 for _ in range(orig_size)])]
                 extra_fields = {
                     "corrupt_task_latents": list(self._current_corrupt_task_latents or [False for _ in range(orig_size)]),
@@ -624,7 +624,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         prompt_ids_list = [p[m].tolist() for p, m in zip(prompt_ids, prompt_mask.bool())]
         completion_ids_list = [c[m].tolist() for c, m in zip(completion_ids, completion_mask.bool())]
         logprobs = None
-        if self.training_stage == 4:
+        if self.training_stage in (4, 5):
             self._current_task_latent_count = [int(x) for x in (latent_counts or [0 for _ in range(len(prompts))])]
             extra_fields = {
                 "corrupt_task_latents": list(self._current_corrupt_task_latents or [False for _ in range(len(prompts))]),
