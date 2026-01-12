@@ -620,7 +620,7 @@ def reward_stage4_scaled_correctness(
     label: Optional[List[str]] = None,
     labels: Optional[List[str]] = None,
     corrupt_task_latents: Optional[List[bool]] = None,
-    task_latent_count: Optional[List[int]] = None,
+    cot_len: Optional[List[int]] = None,
     **kwargs,
 ):
     """
@@ -629,7 +629,7 @@ def reward_stage4_scaled_correctness(
     - If not corrupted:
         - correct: +4 / N
         - wrong:   -4 / N
-      where N = number of task latent tokens (clamped to >= 1).
+      where N = CoT string length (`cot_len`, clamped to >= 1).
     """
     gt_list = labels if labels is not None else label
     if gt_list is None:
@@ -637,8 +637,6 @@ def reward_stage4_scaled_correctness(
 
     if corrupt_task_latents is None:
         corrupt_task_latents = [False for _ in completions]
-    if task_latent_count is None:
-        task_latent_count = [1 for _ in completions]
     correctness = reward_answer_correctness_bench(
         prompts=prompts,
         completions=completions,
@@ -649,25 +647,53 @@ def reward_stage4_scaled_correctness(
         meta=kwargs.get("meta"),
     )
     out: list[float] = []
-    for is_corrupt, corr, n in zip(corrupt_task_latents, correctness, task_latent_count, strict=True):
+    for is_corrupt, corr, n in zip(corrupt_task_latents, correctness, cot_len, strict=True):
         if is_corrupt:
             out.append(0.0)
             continue
-        n_latents = int(n) if n is not None else 0
-        n_latents = max(n_latents, 1)
+        n_cot = int(n)
         is_correct = bool(corr >= 0.5)
-        out.append((4.0 / n_latents) if is_correct else (-4.0 / n_latents))
+        out.append((4.0 / n_cot) if is_correct else (-4.0 / n_cot))
     return out
 
 
 def main():
     parser = argparse.ArgumentParser(description="GRPO try1 training for Bio-LatentCOT (smiles-aware, optional vLLM).")
     parser.add_argument(
-        "--stage",
-        type=int,
-        default=3,
-        choices=[3, 4, 5],
-        help="GRPO training stage (3=baseline rewards, 4=latent-corrupt rewards + masking, 5=combined stage3+stage4 rewards).",
+        "--use_reward_answer_tag",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `format_reward_answer_tag` in reward functions.",
+    )
+    parser.add_argument(
+        "--use_reward_answer_type_validity",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `reward_answer_type_validity` in reward functions.",
+    )
+    parser.add_argument(
+        "--use_reward_answer_correctness_bench",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `reward_answer_correctness_bench` in reward functions.",
+    )
+    parser.add_argument(
+        "--use_reward_answer_correctness",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include legacy `reward_answer_correctness` in reward functions (non-benchmark routing).",
+    )
+    parser.add_argument(
+        "--use_reward_stage4_corrupt_or_correct",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `reward_stage4_corrupt_or_correct` in reward functions (uses `corrupt_prob`).",
+    )
+    parser.add_argument(
+        "--use_reward_stage4_scaled_correctness",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `reward_stage4_scaled_correctness` in reward functions (uses `cot_len`).",
     )
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
 
@@ -761,8 +787,9 @@ def main():
         "num_heads": ModelConfig.NUM_HEADS,
     }
     use_both_latent = bool(args.is_both_latent)
-    if args.stage in (4, 5) and not use_both_latent:
-        raise ValueError("stage=4/5 requires --is_both_latent true.")
+    enable_corruption = float(args.corrupt_prob) > 0.0
+    if enable_corruption and (not use_both_latent):
+        raise ValueError("corrupt_prob>0 requires --is_both_latent true (task latents must exist to corrupt).")
     model = Qwen3MoleculeLLM(
         qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
         mol_config=mol_config,
@@ -824,24 +851,26 @@ def main():
         use_liger_manual=args.use_liger,
     )
 
-    if args.stage == 4:
-        reward_funcs = [reward_stage4_corrupt_or_correct, reward_stage4_scaled_correctness]
-        corrupt_prob = float(args.corrupt_prob)
-        corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
-    elif args.stage == 5:
-        reward_funcs = [
-            format_reward_answer_tag,
-            reward_answer_type_validity,
-            reward_answer_correctness_bench,
-            reward_stage4_corrupt_or_correct,
-            reward_stage4_scaled_correctness,
-        ]
-        corrupt_prob = float(args.corrupt_prob)
-        corrupt_latent_noise_std = float(args.corrupt_latent_noise_std)
-    else:
-        reward_funcs = [format_reward_answer_tag, reward_answer_type_validity, reward_answer_correctness_bench]
-        corrupt_prob = 0.0
-        corrupt_latent_noise_std = 0.0
+    reward_funcs = []
+    if bool(args.use_reward_answer_tag):
+        reward_funcs.append(format_reward_answer_tag)
+    if bool(args.use_reward_answer_type_validity):
+        reward_funcs.append(reward_answer_type_validity)
+    if bool(args.use_reward_answer_correctness):
+        reward_funcs.append(reward_answer_correctness)
+    if bool(args.use_reward_answer_correctness_bench):
+        reward_funcs.append(reward_answer_correctness_bench)
+    if bool(args.use_reward_stage4_corrupt_or_correct):
+        reward_funcs.append(reward_stage4_corrupt_or_correct)
+    if bool(args.use_reward_stage4_scaled_correctness):
+        reward_funcs.append(reward_stage4_scaled_correctness)
+
+    if not reward_funcs:
+        raise ValueError("No reward functions selected. Set at least one `--use_reward_* true` flag.")
+
+    corrupt_prob = float(args.corrupt_prob) if enable_corruption else 0.0
+    corrupt_latent_noise_std = float(args.corrupt_latent_noise_std) if enable_corruption else 0.0
+    training_stage = 4 if enable_corruption else 3
 
     trainer = QwenMoleculeGRPOTrainer(
         model=model,
@@ -849,7 +878,7 @@ def main():
         reward_funcs=reward_funcs,
         train_dataset=train_dataset,
         processing_class=model.tokenizer,
-        training_stage=int(args.stage),
+        training_stage=int(training_stage),
         corrupt_prob=corrupt_prob,
         corrupt_latent_noise_std=corrupt_latent_noise_std,
     )
