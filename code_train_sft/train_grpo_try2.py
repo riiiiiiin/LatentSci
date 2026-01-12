@@ -657,6 +657,63 @@ def reward_stage4_scaled_correctness(
     return out
 
 
+def reward_stage4_double_scaled_correctness(
+    prompts: List[str],
+    completions: List[str],
+    completion_ids=None,
+    label: Optional[List[str]] = None,
+    labels: Optional[List[str]] = None,
+    corrupt_task_latents: Optional[List[bool]] = None,
+    task_latent_count: Optional[List[int]] = None,
+    cot_len: Optional[List[int]] = None,
+    **kwargs,
+):
+    """
+    Stage 4 reward (double-scaled):
+    - If corrupted: reward = 0
+    - If not corrupted:
+        - correct: +100 * (T / C)
+        - wrong:   -100 / (T * C)
+      where:
+        - T = number of task latent tokens (`task_latent_count`, clamped to >= 0 for the correct case, and >= 1 for
+              the wrong case to avoid division by zero)
+        - C = CoT string length (`cot_len`, clamped to >= 1)
+    """
+    gt_list = labels if labels is not None else label
+    if gt_list is None:
+        return [0.0 for _ in completions]
+
+    if corrupt_task_latents is None:
+        corrupt_task_latents = [False for _ in completions]
+    correctness = reward_answer_correctness_bench(
+        prompts=prompts,
+        completions=completions,
+        completion_ids=completion_ids,
+        labels=gt_list,
+        task=kwargs.get("task"),
+        subtask=kwargs.get("subtask"),
+        meta=kwargs.get("meta"),
+        corrupt_task_latents=corrupt_task_latents,
+    )
+
+    out: list[float] = []
+    for is_corrupt, corr, t, c in zip(corrupt_task_latents, correctness, task_latent_count, cot_len, strict=True):
+        if is_corrupt:
+            out.append(0.0)
+            continue
+
+        t_cnt = int(t) 
+        c_len = int(c) 
+
+        is_correct = bool(corr >= 0.5)
+        if is_correct:
+            out.append(100.0 * (float(t_cnt) / float(c_len)))
+        else:
+            denom = float(max(t_cnt, 1)) * float(c_len)
+            out.append(-100.0 / denom)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="GRPO try1 training for Bio-LatentCOT (smiles-aware, optional vLLM).")
     parser.add_argument(
@@ -694,6 +751,12 @@ def main():
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Include `reward_stage4_scaled_correctness` in reward functions (uses `cot_len`).",
+    )
+    parser.add_argument(
+        "--use_reward_stage4_double_scaled_correctness",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Include `reward_stage4_double_scaled_correctness` in reward functions (uses `task_latent_count` + `cot_len`).",
     )
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
 
@@ -864,6 +927,8 @@ def main():
         reward_funcs.append(reward_stage4_corrupt_or_correct)
     if bool(args.use_reward_stage4_scaled_correctness):
         reward_funcs.append(reward_stage4_scaled_correctness)
+    if bool(args.use_reward_stage4_double_scaled_correctness):
+        reward_funcs.append(reward_stage4_double_scaled_correctness)
 
     if not reward_funcs:
         raise ValueError("No reward functions selected. Set at least one `--use_reward_* true` flag.")
