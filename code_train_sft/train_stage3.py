@@ -290,8 +290,42 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
     Unified loader for Stage 3: loads LoRA weights and combined Projector + Bio Updater weights.
     Assumes unified multi-modal checkpoint format.
     """
+    def _ensure_exists(path: str, *, kind: str) -> None:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{kind} path does not exist: {path}")
+
+    def _ensure_is_dir(path: str, *, kind: str) -> None:
+        if not os.path.isdir(path):
+            raise NotADirectoryError(f"{kind} path must be a directory: {path}")
+
+    def _ensure_is_file(path: str, *, kind: str) -> None:
+        if not os.path.isfile(path):
+            raise IsADirectoryError(f"{kind} path must be a file: {path}")
+
+    def _require_ckpt_key(ckpt: dict, key: str, *, path: str) -> None:
+        if key not in ckpt:
+            found = ", ".join(sorted(map(str, ckpt.keys())))
+            raise KeyError(f"Checkpoint {path} is missing key '{key}'. Found keys: [{found}]")
+
     # 1. 加载 LoRA 权重
-    if lora_weights_path and os.path.exists(lora_weights_path):
+    if lora_weights_path:
+        _ensure_exists(lora_weights_path, kind="LoRA")
+        _ensure_is_dir(lora_weights_path, kind="LoRA")
+
+        cfg_path = os.path.join(lora_weights_path, "adapter_config.json")
+        if not os.path.isfile(cfg_path):
+            raise FileNotFoundError(f"LoRA folder is missing required file: {cfg_path}")
+        weight_candidates = [
+            os.path.join(lora_weights_path, "adapter_model.safetensors"),
+            os.path.join(lora_weights_path, "adapter_model.bin"),
+            os.path.join(lora_weights_path, "pytorch_model.bin"),
+        ]
+        if not any(os.path.isfile(p) for p in weight_candidates):
+            raise FileNotFoundError(
+                "LoRA folder is missing adapter weights. Expected one of: "
+                + ", ".join(weight_candidates)
+            )
+
         logger.info(f"Loading LoRA weights from: {lora_weights_path}")
         model.model = PeftModel.from_pretrained(
             model.model, 
@@ -300,26 +334,35 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         )
     
     # 2. 加载多模态组合权重 (Projector + Bio Updater)
-    if mm_projector_path and os.path.exists(mm_projector_path):
+    if mm_projector_path:
+        _ensure_exists(mm_projector_path, kind="Multi-modal checkpoint")
+        _ensure_is_file(mm_projector_path, kind="Multi-modal checkpoint")
+
         logger.info(f"Loading unified multi-modal weights from: {mm_projector_path}")
         device = next(model.parameters()).device
         checkpoint = torch.load(mm_projector_path, map_location=device)
-        
-        # 直接按组合格式加载（兼容旧 checkpoint 缺 key）
-        if "projector" in checkpoint:
-            model.projector.load_state_dict(checkpoint["projector"])
-            logger.info("Loaded projector weights.")
-        else:
-            logger.warning("Checkpoint missing 'projector' key, skipped.")
 
-        if "bio_updater" in checkpoint and hasattr(model, "bio_updater"):
+        if not isinstance(checkpoint, dict):
+            raise TypeError(
+                f"Expected checkpoint dict in {mm_projector_path}, got: {type(checkpoint)}"
+            )
+        
+        # 直接按组合格式加载
+        _require_ckpt_key(checkpoint, "projector", path=mm_projector_path)
+        model.projector.load_state_dict(checkpoint["projector"])
+        logger.info("Loaded projector weights.")
+
+        if hasattr(model, "bio_updater"):
+            _require_ckpt_key(checkpoint, "bio_updater", path=mm_projector_path)
             model.bio_updater.load_state_dict(checkpoint["bio_updater"])
             logger.info("Loaded bio_updater weights.")
 
-        if "bio_thinker" in checkpoint and hasattr(model, "bio_thinker"):
+        if hasattr(model, "bio_thinker"):
+            _require_ckpt_key(checkpoint, "bio_thinker", path=mm_projector_path)
             model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
             logger.info("Loaded bio_thinker weights.")
-        if "task_thinker" in checkpoint and hasattr(model, "task_thinker"):
+        if hasattr(model, "task_thinker"):
+            _require_ckpt_key(checkpoint, "task_thinker", path=mm_projector_path)
             model.task_thinker.load_state_dict(checkpoint["task_thinker"])
             logger.info("Loaded task_thinker weights.")
             
