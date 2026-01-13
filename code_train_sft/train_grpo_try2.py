@@ -10,6 +10,12 @@ from typing import List, Optional
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
+from transformers import TrainerCallback
+
+try:
+    import plotext as plt
+except Exception:  # pragma: no cover
+    plt = None  # type: ignore[assignment]
 
 from config import ModelConfig
 from dataloader import load_grpo_data
@@ -20,6 +26,42 @@ from trainer_try2.grpo_config import GRPOConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class TerminalRewardPlotCallback(TrainerCallback):
+    def __init__(self, reward_key: str = "reward"):
+        self.reward_key = str(reward_key)
+        self.steps: list[int] = []
+        self.rewards: list[float] = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if plt is None:
+            return
+        if not logs or self.reward_key not in logs:
+            return
+        if not state.is_world_process_zero:
+            return
+
+        try:
+            step = int(state.global_step)
+            val = float(logs[self.reward_key])
+        except Exception:
+            return
+
+        self.steps.append(step)
+        self.rewards.append(val)
+
+        display_steps = self.steps[-100:]
+        display_rewards = self.rewards[-100:]
+
+        plt.clf()
+        plt.plot(display_steps, display_rewards, marker="dot", color="green", label=self.reward_key)
+        plt.title("Real-time GRPO Reward (Terminal)")
+        plt.xlabel("Step")
+        plt.ylabel(self.reward_key)
+        plt.plotsize(100, 25)
+        plt.grid(True)
+        plt.show()
 
 
 def _ensure_lora_and_trainables(model: Qwen3MoleculeLLM):
@@ -943,6 +985,7 @@ def main():
         reward_funcs=reward_funcs,
         train_dataset=train_dataset,
         processing_class=model.tokenizer,
+        callbacks=[TerminalRewardPlotCallback()],
         training_stage=int(training_stage),
         corrupt_prob=corrupt_prob,
         corrupt_latent_noise_std=corrupt_latent_noise_std,
