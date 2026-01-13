@@ -1,4 +1,3 @@
-
 import json
 from tqdm import tqdm
 import os
@@ -357,65 +356,51 @@ def calculate_molecular_similarity(mol1, mol2, fingerprint_type='Morgan',
         else:
             raise ValueError(f"对于{fingerprint_type}指纹，只支持Tanimoto相似度")
 
-def eval_moledit_from_list(src_list, pred_list, group_a, group_b, task, total_number):
-    # this_function input: 
-    #   src_list for source_molecules
-    #   pred_list for pred_molecules
-    #   group_a: functional group names for add / remove task
-    #   group_b: another functional group names, if task is not "sub", it's empty
-    #   total_number: len(gt_molecules)+len(cases that cannot extract SMILES)
+from core.task_evaluator import BaseTaskEvaluator
+class MolEditEvaluator(BaseTaskEvaluator):
+    def extract_gt(self, gt_raw_item):
+        '''
+        GT is not used for this task, all use meta
+        '''
+        return ""
+    def prepare_metadata(self, sample):
+        meta = json.loads(sample['meta'])
+        meta['task'] = sample['subtask']
+        return meta
     
-    correct_num = 0
-    for i in range(len(src_list)):
-        if task in ['add']:
-            if check_edit_add_valid(src=src_list[i], tgt=pred_list[i], group=group_a[i]):
-                correct_num += 1
-        if task in ['delete']:
-            if check_edit_del_valid(src=src_list[i], tgt=pred_list[i], group=group_a[i]):
-                correct_num += 1
-        if task == 'sub':
-            if check_edit_sub_valid(src=src_list[i], tgt=pred_list[i], remove_group=group_b[i], add_group=group_a[i]):
-                correct_num += 1
+    def evaluate_predictions(self, preds, gts, total_len, metadata = None):
+        correct_num = 0
+        if len(preds) == 0:
+            return{
+                "correct_rate": 0,
+                "valid-rate": 0
+            }
+        task = metadata[0]['task']
+        for i in range(len(preds)):
+            if task in ['add']:
+                if check_edit_add_valid(src=metadata[i]['molecule'], tgt=preds[i], group=metadata[i]['added_group']):
+                    correct_num += 1
+            if task in ['delete']:
+                if check_edit_del_valid(src=metadata[i]['molecule'], tgt=preds[i], group=metadata[i]['removed_group']):
+                    correct_num += 1
+            if task == 'sub':
+                if check_edit_sub_valid(src=metadata[i]['molecule'], tgt=preds[i], remove_group=metadata[i]['removed_group'], add_group=metadata[i]['added_group']):
+                    correct_num += 1
+        
+        my_dict = {
+            "correct_rate": correct_num / total_len,
+            # f"{task}-valid-rate": len(preds) / total_len,
+        }
+        return my_dict
     
-    my_dict = {
-        "correct_rate": correct_num / total_number,
-        f"{task}-valid-rate": len(pred_list) / total_number,
-    }
-    return my_dict
-    
-def evaluate_moledit_score(model_name, gt_path, logs_dir, results_dir): 
+def evaluate_moledit_score(model_name, gt_path, logs_dir, results_dir, sample_count = 1): 
     result_dict = dict()
+    evaluator = MolEditEvaluator()
     
     for task in ['add', 'delete', 'sub']:
         logger.info(f'evaluating {task} for model {model_name}')
-        file_name = f"{logs_dir}/{task}/{model_name}.json" 
-        pred_results = json.load(open(file_name, "r"))
         
-        gt_name = f"{gt_path}/{task}.json"
-        gts = json.load(open(gt_name, "r"))
-        
-        invalid_number = 0
-        pred_list, src_list = list(), list()
-        group_a, group_b = list(), list()
-        
-        for i, pred in enumerate(pred_results):
-            answer = extract_answer(pred['result'])
-            if answer is None:
-                invalid_number += 1
-                continue
-            pred_list.append(answer)
-            gt = gts[i]
-            meta = json.loads(gt['meta'])
-            src_list.append(meta['molecule'])
-            if task == 'add': group_a.append(meta['added_group'])
-            elif task == 'delete': group_a.append(meta['removed_group'])
-            elif task == 'sub':
-                group_a.append(meta['added_group']); group_b.append(meta['removed_group'])
-        
-        assert len(src_list) == len(pred_list)
-        assert len(src_list) == len(group_a)
-        
-        result_dict[task] = eval_moledit_from_list(src_list=src_list, pred_list=pred_list, group_a=group_a, group_b=group_b, task=task, total_number=len(pred_results)) 
+        result_dict[task] = evaluator.run(model_name, sample_count, gt_path, logs_dir, task)
     
     logger.info(f"eval_score_{model_name}_moledit:\n\r{result_dict}")
     os.makedirs(f"{results_dir}/moledit", exist_ok=True)

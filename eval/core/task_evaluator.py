@@ -23,14 +23,14 @@ class BaseTaskEvaluator(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def evaluate_predictions(self, preds: List[List[str]], gts: List[Any], total_len: int, metadata: Optional[List[List[Dict[str, Any]]]] = None) -> Dict[str, float]:
+    def evaluate_predictions(self, preds: List[List[str]], gts: List[Any], total_len: int, metadata: Any = None) -> Dict[str, float]:
         """对给定 preds/gts 计算评价指标（可覆盖）。
         返回字典形式的指标，例如 {"bleu": 0.8, ...}
         """
         raise NotImplementedError
     
     @abstractmethod
-    def prepare_metadata(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+    def prepare_metadata(self, sample: Dict[str, Any]) -> Any:
         """从单个 sample 准备 metadata（可覆盖）。"""
         raise NotImplementedError
     
@@ -58,7 +58,8 @@ class BaseTaskEvaluator(ABC):
     ) -> Dict[str, Any]:
         log_dir = os.path.join(logs_dir, task_name)
         if not os.path.exists(log_dir):
-            raise ValueError(f"logs_dir {log_dir} is not correct")
+            self.logger.warning(f"log not found: {log_dir}")
+            return {}
 
         samples = self._load_samples(log_dir, model_name)
         gt_raw = self._load_gt_raw(gt_path, task_name)
@@ -67,14 +68,12 @@ class BaseTaskEvaluator(ABC):
             raise ValueError(f"sample count {len(samples)} does not match gt count {len(gt_raw)}")
 
         preds: List[List[str]] = [[] for _ in range(sample_count)]
-        metadata: List[List[Dict[str, Any]]] = [[] for _ in range(sample_count)]
+        metadata: List[Dict[str, Any]] = []
         gts: List[Any] = []
         
         invalid_num = 0
         
         for i, sample in enumerate(samples):
-
-            gt = self.extract_gt(gt_raw[i])
 
             # 支持 sample['result'] 或 sample['results'] 两种格式
             if 'result' in sample:
@@ -85,8 +84,6 @@ class BaseTaskEvaluator(ABC):
                     invalid_num += 1
                     continue
                 preds[0].append(pred)
-                meta = self.prepare_metadata(sample)
-                metadata[0].append(meta)
 
             elif 'results' in sample:
                 if sample_count == 1:
@@ -103,18 +100,17 @@ class BaseTaskEvaluator(ABC):
                         invalid_num += 1
                         continue
                     preds[j].append(pred)
-                    meta = self.prepare_metadata(sample)
-                    metadata[j].append(meta)
 
             else:
                 raise ValueError("sample should have either 'result' or 'results'")
-                
-            gts.append(gt)
+            
+            gts.append(self.extract_gt(gt_raw[i]))
+            metadata.append(self.prepare_metadata(gt_raw[i]))
 
         # 对每个采样集合计算指标
         res_list: List[Dict[str, float]] = []
         for i in range(sample_count):
-            res = self.evaluate_predictions(preds[i], gts, len(samples), metadata[i])
+            res = self.evaluate_predictions(preds[i], gts, len(samples), metadata)
             res_list.append(res)
 
         # 计算 mean 与 std
@@ -129,7 +125,6 @@ class BaseTaskEvaluator(ABC):
         final_res = {
             "mean": res_mean,
             "std": res_std,
-            "raw": res_list,
             "valid_rate": 1.0 - float(invalid_num) / len(samples) if len(samples) > 0 else 0.0,
         }
 
@@ -137,6 +132,7 @@ class BaseTaskEvaluator(ABC):
 
 class MolSimiliarityTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
+        super().__init__()
         from core.evaluator import MoleculeSMILESEvaluator
         self.evaluator = MoleculeSMILESEvaluator()
     def extract_gt(self, gt_raw_item: Dict[str, Any]) -> Any:
@@ -157,6 +153,7 @@ class MolSimiliarityTaskEvaluator(BaseTaskEvaluator):
     
 class TextSimiliarityTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
+        super().__init__()
         from core.evaluator import MoleculeCaptionEvaluator
         self.evaluator = MoleculeCaptionEvaluator()
         
@@ -179,7 +176,7 @@ class AllCoTTextSimiliarityTaskEvaluator(TextSimiliarityTaskEvaluator):
 
 class ExactMatchTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
-        pass
+        super().__init__()
 
     def extract_gt(self, gt_raw_item):
         return gt_raw_item['gt']
