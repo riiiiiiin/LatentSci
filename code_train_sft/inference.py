@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # TODO: extract this logic into model_stage3.py
 from train_stage3 import load_trained_components_stage3
 
-def load_test_data(test_data_path, max_len=None):
+def load_test_data(test_data_path, include_tasks, max_len=None):
     """
     load test data dispatcher
     exclude subtasks per-bench here
@@ -47,14 +47,19 @@ def load_test_data(test_data_path, max_len=None):
     logger.info(f"Loading test/eval data from: {test_data_path} (eval_mode=True)")
 
     if "ChemCoTBench" in test_data_path:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, exclude_tasks=['rcr', 'mechsel'], max_len=max_len)
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr', 'mechsel'], max_len=max_len)
         logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
-        return dataset
+    elif "ChemCoTDataset" in test_data_path:
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr'], max_len=max_len)
+        logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
+    
+    return dataset
 
 def prepare_evaluation_dataset(
     test_data_path,
     tokenization_max_len=None,
     max_samples=None,
+    include_tasks = None,
     proc_index: int = 0,
     num_procs: int = 1,
     ):
@@ -62,8 +67,7 @@ def prepare_evaluation_dataset(
     
     """
     logger.info(f"Preparing evaluation metadata from {test_data_path}")
-
-    dataset = load_test_data(test_data_path, max_len=tokenization_max_len)
+    dataset = load_test_data(test_data_path, include_tasks, max_len=tokenization_max_len)
     original_total = len(dataset)
 
     if max_samples is not None and max_samples < len(dataset):
@@ -270,6 +274,7 @@ def inference_stage3():
     parser.add_argument("--top_p", type=float, default=0.9, help="top-p采样参数（用于inference模式）")
     parser.add_argument("--max_test_samples", type=int, default=None, help="最大测试样本数，None表示全部测试（用于inference模式）")
     parser.add_argument("--num_return_sequences", type=int, default=1, help="生成重复次数（用于inference模式）")
+    parser.add_argument("--include_tasks", type=str, nargs="*", default=None, help="需要包含的任务类型，None表示全部任务（用于inference模式）")
     # Stage 3 switches (only effective when --training_stage 3)
     # parser.add_argument(
     #     "--is_coconut",
@@ -416,6 +421,7 @@ def inference_stage3():
             test_data_path=args.data_path,
             tokenization_max_len=min(args.max_seq_length, ModelConfig.MAX_TEXT_LEN),
             max_samples=args.max_test_samples,
+            include_tasks=args.include_tasks,
             proc_index=args.proc_index,
             num_procs=args.num_procs,
         )

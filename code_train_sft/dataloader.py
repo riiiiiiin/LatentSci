@@ -379,6 +379,7 @@ def load_data(
     is_coconut=False,
     scheduled_stage=0,
     c_thought=2,
+    include_tasks=None,
     exclude_tasks=['rcr'],
     eval_mode: bool = False,
 ):
@@ -390,6 +391,8 @@ def load_data(
     all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
 
     def filter_data(f):
+        if include_tasks:
+            return any([f.endswith(f"{task}.json") for task in include_tasks])
         return all([not f.endswith(f"{task}.json") for task in exclude_tasks])
 
     data_files = [f for f in all_json_files if filter_data(f)]
@@ -412,7 +415,15 @@ def load_data(
     )
 
     # Step 2: 构造训练/评估样本
-    if is_coconut:
+    if eval_mode:
+        dataset = dataset.map(
+            llm_tokenize,
+            batched=False,
+            fn_kwargs={"include_cot": include_cot, "max_len": max_len, "is_eval": eval_mode},
+                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+        )
+    
+    elif is_coconut:
         dataset = dataset.map(
             coconut_tokenize,
             batched=False,
@@ -429,7 +440,7 @@ def load_data(
             llm_tokenize,
             batched=False,
                 fn_kwargs={"include_cot": include_cot, "max_len": max_len, "is_eval": eval_mode},
-                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps"]
+                remove_columns=["query", "input_smiles", "label", "cot", "cot_steps", "task", "subtask", "meta"]
         )
 
     return dataset

@@ -6,12 +6,14 @@ set -euo pipefail
 EXP_NAME=<exp_name>
 CKPT_DIR_NAME=<ckpt_name>
 DATASET_NAME=ChemCoTBench
+INCLUDE_TASKS=""
 CUDA_DEVICES=0,1
 
 # =========================
 # inference config
 # =========================
 BATCH_SIZE=4
+NUM_RETURN_SEQUENCES=1
 MAX_NEW_TOKENS=2048
 TEMPERATURE=0.7
 TOP_P=0.9
@@ -41,6 +43,7 @@ PYTHON_BIN="python"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_NAME="${EXP_NAME}_${TIMESTAMP}"
+LOG_NAME="${LOG_NAME//\//_}"
 INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.json"
 
 echo "========== Stage-3 Inference Runner =========="
@@ -112,11 +115,13 @@ for idx in "${!GPU_ARRAY[@]}"; do
   CMD=(
     "${PYTHON_BIN}" "${SCRIPT_PATH}"
     --data_path "${DATA_PATH}"
+    --include_tasks ${INCLUDE_TASKS}
     --lora_path "${LORA_PATH}"
     --projector_path "${PROJECTOR_PATH}"
     --training_stage "${TRAINING_STAGE}"
     --c_thought "${C_THOUGHT}"
     --batch_size "${BATCH_SIZE}"
+    --num_return_sequences "${NUM_RETURN_SEQUENCES}"
     --max_seq_length "${MAX_SEQ_LENGTH}"
     --max_new_tokens "${MAX_NEW_TOKENS}"
     --temperature "${TEMPERATURE}"
