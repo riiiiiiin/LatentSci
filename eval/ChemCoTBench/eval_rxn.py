@@ -20,6 +20,8 @@ subtask_to_result_key = {
 def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir):
     log_dir = f"{log_dir}/{subtask}"
     
+    invalid_num = 0
+    
     if not os.path.exists(log_dir):
         raise ValueError(f"logs_dir {log_dir} is not correct")
     samples = read_json(f"{log_dir}/{model_name}.json")
@@ -39,16 +41,17 @@ def evaluate_mol(model_name: str, subtask: str, gt_path, log_dir):
         else:
             gts.append(gt)
 
-        try:
-            pred_smiles = extract_answer(sample['result'])
-            preds.append(pred_smiles)
-        except Exception as e:
-            logger.debug(f'error parsing {sample['result']}: {e}')
-            preds.append('')
+        
+        pred_smiles = extract_answer(sample['result'])
+        if not pred_smiles:
+            invalid_num += 1
+            pred_smiles = ""
+        preds.append(pred_smiles)
         
     res = evaluator.evaluate(preds, gts)
     fts = (res['rdk_sims'] + res['maccs_sims'] + res['morgan_sims']) / 3
     res['fts'] = fts
+    res['valid_rate'] = 1 - invalid_num / len(preds)
         
     return res
 
@@ -68,6 +71,8 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir):
         raise ValueError(f"logs_dir {logs_dir} is not correct")
     samples = read_json(f"{logs_dir}/{model_name}.json")
     gt_raw = read_json(f'{gt_path}/mechsel.json')
+    
+    invalid_num = 0
 
     preds = []
     gts = []
@@ -77,6 +82,7 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir):
         # if pred_choice is not a valid choice, we treat it as empty
         if not pred_choice.lower().isalpha():
             pred_choice = ""
+            invalid_num += 1
 
         pred_choice = pred_choice.lower()
         gt = gt_raw[i]['gt'].lower()
@@ -84,7 +90,7 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir):
         gts.append(gt)
 
     accuracy = sum(1 for pred, gt in zip(preds, gts) if pred == gt) / len(gts)
-    return {"MCQ Accuracy (mean)": accuracy}
+    return {"MCQ Accuracy (mean)": accuracy, "valid_rate": 1 - invalid_num / len(preds)}
 
 def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str, results_dir):
     all_results = {}

@@ -4,6 +4,7 @@ import os
 import logging
 from ChemCoTBench.core.eval_metric import mol_opt_evaluater
 from core.utils import extract_answer
+import regex as re
 
 def eval_molund_from_list(gt_list, pred_list, total_number, task):
     # this_function input: 
@@ -70,6 +71,12 @@ def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir):
             if answer is None:
                 invalid_number += 1
                 continue
+            if task in task in ["ring_count", "fg_samples", "fg_count"]:
+                try:
+                    answer = abs(int(re.sub(r'\D', '', answer)))
+                except:
+                    invalid_number += 1
+                    continue
             pred_list.append(answer)
             gt_list.append(gts[i]['gt'])
         

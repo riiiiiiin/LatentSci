@@ -16,7 +16,7 @@ from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, mean_a
 
 RDLogger.DisableLog('rdApp.*')
 # nltk.download('wordnet')
-
+nltk.download('punkt_tab')
 
 def exact_match(ot_smi, gt_smi):
     m_out = Chem.MolFromSmiles(ot_smi)
