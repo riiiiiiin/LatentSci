@@ -196,7 +196,7 @@ def reward_answer_type_validity(
     **kwargs,
 ):
     """
-    Reward 5.0 if the `<answer>...</answer>` content matches the *type* the prompt asks for:
+    Reward 0.5 if the `<answer>...</answer>` content matches the *type* the prompt asks for:
     - SMILES: RDKit parses
     - Number: parses as float
     - Yes/No: matches yes/no (case-insensitive)
@@ -238,20 +238,20 @@ def reward_answer_type_validity(
                 if mol is not None:
                     ok = True
                     break
-            rewards.append(5.0 if ok else 0.0)
+            rewards.append(0.5 if ok else 0.0)
         elif expected == "number":
             cleaned = re.sub(r"^\s*(count|number)\s*[:=]\s*", "", cleaned, flags=re.IGNORECASE).strip()
             cleaned = cleaned.replace(",", "")
             try:
                 float(cleaned)
-                rewards.append(5.0)
+                rewards.append(0.5)
             except Exception:
                 rewards.append(0.0)
         elif expected == "yesno":
             lo = cleaned.lower()
             lo = re.sub(r"^\s*(answer|output)\s*[:=]\s*", "", lo).strip()
             if lo in {"yes", "no"}:
-                rewards.append(5.0)
+                rewards.append(0.5)
             else:
                 rewards.append(0.0)
         else:
@@ -391,7 +391,7 @@ def reward_answer_correctness_bench(
         - mol_und/reaction: exact match (as before)
 
     Returns:
-      10.0 if correct, else 0.0
+      4.0 if correct, else 0.0
     """
     gt_list = labels if labels is not None else label
 
@@ -462,7 +462,7 @@ def reward_answer_correctness_bench(
                     except Exception:
                         ok = False
 
-                rewards.append(10.0 if ok else 0.0)
+                rewards.append(4.0 if ok else 0.0)
                 continue
 
             # 2) Molecule optimization benchmark (oracle-based improvement)
@@ -502,7 +502,7 @@ def reward_answer_correctness_bench(
                     except Exception:
                         ok = False
 
-                rewards.append(10.0 if ok else 0.0)
+                rewards.append(4.0 if ok else 0.0)
                 continue
 
             # 3) Default SMILES: exact match (canonicalized)
@@ -529,7 +529,7 @@ def reward_answer_correctness_bench(
 
             pred_can = canon(pred_clean)
             gold_can = canon(gold_clean)
-            rewards.append(10.0 if (pred_can is not None and gold_can is not None and pred_can == gold_can) else 0.0)
+            rewards.append(4.0 if (pred_can is not None and gold_can is not None and pred_can == gold_can) else 0.0)
             continue
 
         # Non-SMILES: keep original strict matching logic
@@ -554,7 +554,7 @@ def reward_answer_correctness_bench(
             if pn is None or gn is None:
                 rewards.append(0.0)
             else:
-                rewards.append(10.0 if math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3) else 0.0)
+                rewards.append(4.0 if math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3) else 0.0)
         elif expected == "yesno":
             def norm_yesno(s: str) -> Optional[str]:
                 s = s.strip().lower()
@@ -566,9 +566,9 @@ def reward_answer_correctness_bench(
 
             py = norm_yesno(pred_clean)
             gy = norm_yesno(gold_clean)
-            rewards.append(10.0 if (py is not None and gy is not None and py == gy) else 0.0)
+            rewards.append(4.0 if (py is not None and gy is not None and py == gy) else 0.0)
         else:
-            rewards.append(10.0 if pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "" else 0.0)
+            rewards.append(4.0 if pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "" else 0.0)
 
     return rewards
 
