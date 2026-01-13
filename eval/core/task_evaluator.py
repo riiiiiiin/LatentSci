@@ -74,7 +74,7 @@ class BaseTaskEvaluator(ABC):
         invalid_num = 0
         
         for i, sample in enumerate(samples):
-
+            
             # 支持 sample['result'] 或 sample['results'] 两种格式
             if 'result' in sample:
                 if sample_count > 1:
@@ -97,8 +97,8 @@ class BaseTaskEvaluator(ABC):
                 for j in range(sample_count):
                     pred = self.extract_answer(results[j])
                     if pred is None:
+                        pred = ""
                         invalid_num += 1
-                        continue
                     preds[j].append(pred)
 
             else:
@@ -125,7 +125,7 @@ class BaseTaskEvaluator(ABC):
         final_res = {
             "mean": res_mean,
             "std": res_std,
-            "valid_rate": 1.0 - float(invalid_num) / len(samples) if len(samples) > 0 else 0.0,
+            "valid_rate": 1.0 - float(invalid_num) / (len(samples) * sample_count) if len(samples) > 0 else 0.0,
         }
 
         return final_res
