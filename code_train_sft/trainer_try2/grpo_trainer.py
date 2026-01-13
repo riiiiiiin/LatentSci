@@ -310,6 +310,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             model=vllm_ckpt,
             tensor_parallel_size=self.vllm_tensor_parallel_size,
             gpu_memory_utilization=self.vllm_gpu_memory_utilization,
+            swap_space=0,
             max_num_seqs=vllm_max_num_seqs,
             max_model_len=self.vllm_max_model_length,
             distributed_executor_backend="external_launcher",
