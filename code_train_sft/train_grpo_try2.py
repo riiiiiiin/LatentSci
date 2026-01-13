@@ -855,7 +855,12 @@ def main():
     # GRPO
     parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument("--num_iterations", type=int, default=1)
-    parser.add_argument("--steps_per_generation", type=int, default=1)
+    parser.add_argument(
+        "--steps_per_generation",
+        type=int,
+        default=None,
+        help="How many training steps to reuse one rollout batch. If omitted, GRPO defaults to `grad_accum`.",
+    )
     parser.add_argument("--beta", type=float, default=0.0, help="KL beta (0 disables ref model).")
     parser.add_argument("--epsilon", type=float, default=0.2)
 
