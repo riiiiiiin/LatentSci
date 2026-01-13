@@ -111,6 +111,7 @@ def run_inference_on_dataset(
     temperature=0.7,
     top_p=0.9,
     inference_batch_size: int = 8,
+    num_return_sequences: int = 1,
 ):
     """Run inference over a prepared dataset using mini-batches.
 
@@ -142,7 +143,7 @@ def run_inference_on_dataset(
         input_tensors = []
         smiles_batch = []
         raw_items = []
-
+    
         # TODO: batch inputs in dataloader
         for idx in batch_indices:
             item = dataset[idx]
@@ -172,7 +173,8 @@ def run_inference_on_dataset(
                 temperature=temperature,
                 top_p=top_p,
                 do_sample=True if temperature > 0 else False,
-            )
+                num_return_sequences=num_return_sequences,
+            ) # (B * N, L)
         
         try:
             del padded_input_ids
@@ -189,13 +191,18 @@ def run_inference_on_dataset(
             gen_tensor = torch.stack(generated_ids) if isinstance(generated_ids, (list, tuple)) else torch.tensor(generated_ids)
         
         batch_size = len(batch_indices)
-        if gen_tensor.size(0) != batch_size:
-            raise Exception(f"Generated tensor batch size ({gen_tensor.size(0)}) != expected ({batch_size}).")
+        if gen_tensor.size(0) != batch_size * num_return_sequences:
+            raise Exception(f"Generated tensor batch size ({gen_tensor.size(0)}) != expected ({batch_size} * {num_return_sequences}).")
         
         gen_tensor_cpu = gen_tensor.tolist()
         decoded_list = tokenizer.batch_decode(gen_tensor_cpu, skip_special_tokens=True)
-        for decoded in decoded_list:
-            generation_outputs.append({"result": decoded.strip()})
+        if num_return_sequences > 1:
+            for i in range(batch_size):
+                results = decoded_list[i * num_return_sequences : (i + 1) * num_return_sequences]
+                generation_outputs.append({"results": [result.strip() for result in results]})
+        else:     
+            for decoded in decoded_list:
+                generation_outputs.append({"result": decoded.strip()})
         
         try: 
             del gen_tensor
@@ -262,6 +269,7 @@ def inference_stage3():
     parser.add_argument("--temperature", type=float, default=0.7, help="生成温度（用于inference模式）")
     parser.add_argument("--top_p", type=float, default=0.9, help="top-p采样参数（用于inference模式）")
     parser.add_argument("--max_test_samples", type=int, default=None, help="最大测试样本数，None表示全部测试（用于inference模式）")
+    parser.add_argument("--num_return_sequences", type=int, default=1, help="生成重复次数（用于inference模式）")
     # Stage 3 switches (only effective when --training_stage 3)
     # parser.add_argument(
     #     "--is_coconut",
@@ -421,7 +429,8 @@ def inference_stage3():
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
-            inference_batch_size=args.batch_size
+            inference_batch_size=args.batch_size,
+            num_return_sequences=args.num_return_sequences,
         )
         
         # 3. save results
