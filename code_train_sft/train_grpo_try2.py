@@ -626,8 +626,8 @@ def reward_stage4_corrupt_or_correct(
 ):
     """
     Stage 4 reward:
-    - If corrupted: reward = -1 if correct else 0
-    - If not corrupted: reward = correctness (1 if correct else 0)
+    - If corrupted: reward = -2 if correct else 0
+    - If not corrupted: reward = correctness (2 if correct else 0)
     """
     gt_list = labels if labels is not None else label
     if gt_list is None:
@@ -649,9 +649,9 @@ def reward_stage4_corrupt_or_correct(
     for is_corrupt, corr in zip(corrupt_task_latents, correctness, strict=True):
         is_correct = bool(corr >= 0.5)
         if is_corrupt:
-            out.append(-1.0 if is_correct else 0.0)
+            out.append(-2.0 if is_correct else 0.0)
         else:
-            out.append(1.0 if is_correct else 0.0)
+            out.append(2.0 if is_correct else 0.0)
     return out
 
 
