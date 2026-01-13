@@ -886,7 +886,7 @@ def main():
         bf16=True,
         gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": False} if args.gradient_checkpointing else None,
-        ddp_find_unused_parameters=True,
+        ddp_find_unused_parameters=False,
         # Some submodules (e.g. frozen molecule encoder) can contain inference-mode buffers; broadcasting them under
         # DDP may error with "Inplace update to inference tensor". LLM training does not rely on buffer sync.
         ddp_broadcast_buffers=False,
