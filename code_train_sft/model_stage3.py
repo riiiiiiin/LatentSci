@@ -793,6 +793,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             inputs_embeds=model_input_embeds,
             attention_mask=final_attn_mask,
             labels=final_labels,
+            use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=True,
