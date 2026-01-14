@@ -15,14 +15,13 @@ from __future__ import annotations
 import os
 import time
 import hashlib
-import math
-import re
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
 import torch
 from transformers import Trainer as _HFTrainer
 
+from trainer_try2.reward_func import is_correct_answer_bench
 from trl.models import unwrap_model_for_generation
 from trl.trainer.grpo_trainer import GRPOTrainer as _TRL_GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
@@ -40,106 +39,6 @@ def _normalize_smiles_batch(smiles_batch: list[Any] | None) -> list[list[str]] |
         else:
             out.append(list(item))
     return out
-
-
-_ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
-_PROMPT_EXPECT_RE = re.compile(r"formatted as\s*<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
-_RDKit_LOGS_DISABLED = False
-
-
-def _get_rdkit_chem():
-    global _RDKit_LOGS_DISABLED
-    try:
-        from rdkit import Chem  # type: ignore
-        from rdkit import RDLogger  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise ImportError("RDKit is required for SMILES correctness checks.") from e
-
-    if not _RDKit_LOGS_DISABLED:
-        RDLogger.DisableLog("rdApp.error")
-        RDLogger.DisableLog("rdApp.warning")
-        _RDKit_LOGS_DISABLED = True
-    return Chem
-
-
-def _infer_expected_answer_type(prompt: str) -> str:
-    m = _PROMPT_EXPECT_RE.search(prompt or "")
-    if not m:
-        return "unknown"
-    spec = (m.group(1) or "").strip().lower()
-    if "smiles" in spec:
-        return "smiles"
-    if "yes" in spec and "no" in spec:
-        return "yesno"
-    if "number" in spec:
-        return "number"
-    return "unknown"
-
-
-def _extract_answer_text(completion: str) -> Optional[str]:
-    m = _ANSWER_RE.search(completion or "")
-    if not m:
-        return None
-    return m.group(1).strip()
-
-
-def _is_correct_answer(prompt: str, completion: str, label: str) -> bool:
-    expected = _infer_expected_answer_type(prompt)
-    pred = _extract_answer_text(completion or "")
-    gold = _extract_answer_text(label or "") or (label or "").strip()
-    if pred is None:
-        return False
-
-    pred_clean = pred.strip().strip("\"'`")
-    gold_clean = (gold or "").strip().strip("\"'`")
-
-    if expected == "smiles":
-        Chem = _get_rdkit_chem()
-
-        def canon(s: str) -> Optional[str]:
-            try:
-                mol = Chem.MolFromSmiles(s)  # type: ignore[attr-defined]
-            except Exception:
-                mol = None
-            if mol is None:
-                return None
-            try:
-                return Chem.MolToSmiles(mol, canonical=True)  # type: ignore[attr-defined]
-            except Exception:
-                return None
-
-        pred_can = canon(pred_clean)
-        gold_can = canon(gold_clean)
-        return bool(pred_can is not None and gold_can is not None and pred_can == gold_can)
-
-    if expected == "number":
-        def parse_num(s: str) -> Optional[float]:
-            try:
-                return float(s)
-            except Exception:
-                return None
-
-        pn = parse_num(pred_clean)
-        gn = parse_num(gold_clean)
-        if pn is None or gn is None:
-            return False
-        return bool(math.isclose(pn, gn, rel_tol=1e-3, abs_tol=1e-3))
-
-    if expected == "yesno":
-        def norm_yesno(s: str) -> Optional[str]:
-            s = s.strip().lower()
-            if s in {"yes"}:
-                return "yes"
-            if s in {"no"}:
-                return "no"
-            return None
-
-        py = norm_yesno(pred_clean)
-        gy = norm_yesno(gold_clean)
-        return bool(py is not None and gy is not None and py == gy)
-
-    return bool(pred_clean.strip().lower() == gold_clean.strip().lower() and gold_clean != "")
-
 
 def _stable_hash01(text: str, seed: int, step: int) -> float:
     payload = f"{seed}:{step}:{text}".encode("utf-8")
@@ -435,10 +334,14 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             completions_text = self.processing_class.batch_decode(
                 output["completion_ids"], skip_special_tokens=True
             )
-            is_correct = [
-                _is_correct_answer(p, c, y)
-                for p, c, y in zip(prompts_text, completions_text, labels_text, strict=True)
-            ]
+            tasks_text = [ex.get("task") for ex in inputs]
+            subtasks_text = [ex.get("subtask") for ex in inputs]
+            meta_text = [ex.get("meta") for ex in inputs]
+            is_correct = []
+            for p, c, y, t, st, m in zip(
+                prompts_text, completions_text, labels_text, tasks_text, subtasks_text, meta_text, strict=True
+            ):
+                is_correct.append(is_correct_answer_bench(p, c, y, task=t, subtask=st, meta=m))
             loss_mask = torch.tensor(
                 [((not corr) or ok) for corr, ok in zip(self._current_corrupt_task_latents, is_correct, strict=True)],
                 device=device,

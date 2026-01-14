@@ -803,6 +803,24 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # Loss = avg_i max(0, alpha - cos(v_i, mu_i)), where v_i is detached.
         # =========================================================
         ce_loss = outputs.loss
+        if ce_loss is None:
+            # GRPO log-prob computation (and some inference paths) call `forward()` without labels.
+            # In that case HF returns `loss=None`; skip all auxiliary loss bookkeeping and only return logits.
+            return BioLatentCausalLMOutputWithPast(
+                loss=None,
+                logits=outputs.logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+                ce_loss=None,
+                bio_latent_loss=None,
+                bio_latent_loss_scaled=None,
+                bio_latent_active=False,
+                task_latent_loss=None,
+                task_latent_loss_scaled=None,
+                task_latent_active=False,
+            )
+
         total_loss = ce_loss
 
         bio_latent_loss = ce_loss.new_tensor(0.0)
