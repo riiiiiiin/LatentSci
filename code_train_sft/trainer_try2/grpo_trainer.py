@@ -576,7 +576,8 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         all_entropies = []
 
         model_to_check = self.accelerator.unwrap_model(model)
-        use_prompt_embeds = bool(getattr(model_to_check, "is_both_latent", False))
+        # use_prompt_embeds = bool(getattr(model_to_check, "is_both_latent", False))
+        use_prompt_embeds = True
 
         if use_prompt_embeds:
             if not hasattr(model_to_check, "get_prompt_embeddings"):
@@ -640,70 +641,70 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
             return logps, entropies
 
-        num_queries = int(getattr(model_to_check, "num_queries", 0))
-        if num_queries <= 0:
-            # Unexpected: fall back to TRL behavior.
-            return super()._get_per_token_logps_and_entropies(
-                model,
-                input_ids,
-                attention_mask,
-                logits_to_keep,
-                batch_size=batch_size,
-                compute_entropy=compute_entropy,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-                num_images=num_images,
-                pixel_attention_mask=pixel_attention_mask,
-                image_sizes=image_sizes,
-                token_type_ids=token_type_ids,
-            )
+        # num_queries = int(getattr(model_to_check, "num_queries", 0))
+        # if num_queries <= 0:
+        #     # Unexpected: fall back to TRL behavior.
+        #     return super()._get_per_token_logps_and_entropies(
+        #         model,
+        #         input_ids,
+        #         attention_mask,
+        #         logits_to_keep,
+        #         batch_size=batch_size,
+        #         compute_entropy=compute_entropy,
+        #         pixel_values=pixel_values,
+        #         image_grid_thw=image_grid_thw,
+        #         num_images=num_images,
+        #         pixel_attention_mask=pixel_attention_mask,
+        #         image_sizes=image_sizes,
+        #         token_type_ids=token_type_ids,
+        #     )
 
-        for start in range(0, input_ids.size(0), batch_size):
-            end = start + batch_size
-            input_ids_batch = input_ids[start:end]
-            attention_mask_batch = attention_mask[start:end]
-            smiles_batch = smiles_to_use[start:end]
+        # for start in range(0, input_ids.size(0), batch_size):
+        #     end = start + batch_size
+        #     input_ids_batch = input_ids[start:end]
+        #     attention_mask_batch = attention_mask[start:end]
+        #     smiles_batch = smiles_to_use[start:end]
 
-            model_inputs = {
-                "input_ids": input_ids_batch,
-                "attention_mask": attention_mask_batch,
-                "use_cache": False,
-                "smiles": smiles_batch,
-            }
-            logits_full = model(**model_inputs).logits  # (B, L_fused, V)
-            logits_full = logits_full[:, :-1, :]  # next-token shift
+        #     model_inputs = {
+        #         "input_ids": input_ids_batch,
+        #         "attention_mask": attention_mask_batch,
+        #         "use_cache": False,
+        #         "smiles": smiles_batch,
+        #     }
+        #     logits_full = model(**model_inputs).logits  # (B, L_fused, V)
+        #     logits_full = logits_full[:, :-1, :]  # next-token shift
 
-            completion_ids = input_ids_batch[:, -logits_to_keep:]
-            completion_attn = attention_mask_batch[:, -logits_to_keep:]
+        #     completion_ids = input_ids_batch[:, -logits_to_keep:]
+        #     completion_attn = attention_mask_batch[:, -logits_to_keep:]
 
-            completion_lens = completion_attn.sum(dim=1).to(torch.long)
-            text_lens = attention_mask_batch.sum(dim=1).to(torch.long)
-            prompt_lens = (text_lens - completion_lens).clamp(min=0)
+        #     completion_lens = completion_attn.sum(dim=1).to(torch.long)
+        #     text_lens = attention_mask_batch.sum(dim=1).to(torch.long)
+        #     prompt_lens = (text_lens - completion_lens).clamp(min=0)
 
-            mol_prefix_lens = torch.tensor(
-                [(len(s) if isinstance(s, list) else 0) * (num_queries + 2) for s in smiles_batch],
-                device=logits_full.device,
-                dtype=torch.long,
-            )
+        #     mol_prefix_lens = torch.tensor(
+        #         [(len(s) if isinstance(s, list) else 0) * (num_queries + 2) for s in smiles_batch],
+        #         device=logits_full.device,
+        #         dtype=torch.long,
+        #     )
 
-            j = torch.arange(logits_to_keep, device=logits_full.device, dtype=torch.long).unsqueeze(0)
-            pos = mol_prefix_lens.unsqueeze(1) + prompt_lens.unsqueeze(1) + j - 1
-            pos = pos.clamp(min=0, max=logits_full.size(1) - 1)
-            batch_idx = torch.arange(logits_full.size(0), device=logits_full.device, dtype=torch.long).unsqueeze(1)
-            logits = logits_full[batch_idx, pos]  # (B, T, V)
-            logits = logits / self.temperature
+        #     j = torch.arange(logits_to_keep, device=logits_full.device, dtype=torch.long).unsqueeze(0)
+        #     pos = mol_prefix_lens.unsqueeze(1) + prompt_lens.unsqueeze(1) + j - 1
+        #     pos = pos.clamp(min=0, max=logits_full.size(1) - 1)
+        #     batch_idx = torch.arange(logits_full.size(0), device=logits_full.device, dtype=torch.long).unsqueeze(1)
+        #     logits = logits_full[batch_idx, pos]  # (B, T, V)
+        #     logits = logits / self.temperature
 
-            logps = selective_log_softmax(logits, completion_ids) * completion_attn.to(torch.float32)
-            all_logps.append(logps)
+        #     logps = selective_log_softmax(logits, completion_ids) * completion_attn.to(torch.float32)
+        #     all_logps.append(logps)
 
-            if compute_entropy:
-                with torch.no_grad():
-                    entropies = entropy_from_logits(logits) * completion_attn.to(torch.float32)
-                all_entropies.append(entropies)
+        #     if compute_entropy:
+        #         with torch.no_grad():
+        #             entropies = entropy_from_logits(logits) * completion_attn.to(torch.float32)
+        #         all_entropies.append(entropies)
 
-        logps = torch.cat(all_logps, dim=0)
-        entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
-        return logps, entropies
+        # logps = torch.cat(all_logps, dim=0)
+        # entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
+        # return logps, entropies
 
     def _compute_loss(self, model, inputs):
         # Ensure the current batch's `smiles` is visible to `_get_per_token_logps_and_entropies` when the parent
