@@ -17,7 +17,7 @@ conda activate biolatenecot_dev
 
 pip install trl==0.26.2 pytorch-fast-transformers==0.4.0 rdkit peft==0.17.1  plotext wandb liger-kernel vllm==0.11.2
 
-# During the two following cmds, there might be some compatibility errors. Ignore them.
+# The following installation is only needed for small moleculae GRPO training. If you are not training a small molecule model, you don't need them. During the two following cmds, there might be some compatibility errors. Ignore them.
 pip install PyTDC
 
 pip install transformers==4.57.3 accelerate==1.10.1
@@ -54,19 +54,25 @@ Follow these steps:
 
 2️⃣Dataset repair,To fill in missing fields in the dataset, use single quotes (''). And we will not use the data in rxn for the time being.
 
+```
 cd code_train_sft 
 
 python xiufu.py
+```
 
 🧠 Model Download (under dir BioLatentCOT)
 
 Download pretrained model from Hugging Face
 
+```
 huggingface-cli download --resume-download Qwen/Qwen3-8B-Base --local-dir ./models/Qwen3-8B-Base
+```
 
 Download small molecule foundation model from Hugging Face
 
+```
 huggingface-cli download --resume-download ibm-research/materials.smi-ted --local-dir ./models/smi-ted
+```
 
 🏋️ Training 
 ```
