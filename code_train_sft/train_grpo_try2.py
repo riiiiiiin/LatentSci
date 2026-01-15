@@ -8,6 +8,11 @@ from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 from transformers import TrainerCallback
 
 try:
+    import wandb  # type: ignore
+except Exception:  # pragma: no cover
+    wandb = None  # type: ignore[assignment]
+
+try:
     import plotext as plt
 except Exception:  # pragma: no cover
     plt = None  # type: ignore[assignment]
@@ -193,6 +198,29 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./outputs/grpo_try1")
     parser.add_argument("--run_name", type=str, default=None)
 
+    # Logging / Weights & Biases
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="wandb",
+        help="Trainer reporters (e.g. 'wandb' or 'none'). Default: wandb.",
+    )
+    parser.add_argument("--wandb_project", type=str, default="biolatent-grpo")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="offline",
+        choices=["offline", "online", "disabled"],
+        help="W&B mode. 'disabled' forces report_to='none'.",
+    )
+    parser.add_argument(
+        "--wandb_dir",
+        type=str,
+        default=None,
+        help="W&B log dir. Defaults to `<repo>/code_train_sft/wandb`.",
+    )
+
     # Training
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--max_steps", type=int, default=-1)
@@ -273,6 +301,25 @@ def main():
     run_name = args.run_name or f"grpo_try1-{datetime.now().strftime('%m%d-%H%M')}"
     os.makedirs(args.output_dir, exist_ok=True)
 
+    report_to = str(args.report_to or "none")
+    if str(args.wandb_mode).lower() == "disabled":
+        report_to = "none"
+    if "wandb" in report_to.lower():
+        if wandb is None:
+            raise ImportError("W&B is enabled (report_to includes 'wandb') but `wandb` is not installed.")
+        wandb_dir = args.wandb_dir
+        if not wandb_dir:
+            wandb_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wandb")
+        os.makedirs(wandb_dir, exist_ok=True)
+        wandb.init(
+            project=str(args.wandb_project),
+            entity=(str(args.wandb_entity) if args.wandb_entity else None),
+            name=run_name,
+            mode=str(args.wandb_mode).lower(),
+            dir=wandb_dir,
+            config=vars(args),
+        )
+
     # 1) Build model
     mol_config = {
         "num_queries": ModelConfig.NUM_QUERIES,
@@ -305,6 +352,7 @@ def main():
     # 5) GRPO config
     grpo_args = GRPOConfig(
         output_dir=os.path.join(args.output_dir, run_name),
+        run_name=run_name,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
@@ -321,7 +369,7 @@ def main():
         # DDP may error with "Inplace update to inference tensor". LLM training does not rely on buffer sync.
         ddp_broadcast_buffers=False,
         remove_unused_columns=False,
-        report_to="none",
+        report_to=report_to,
         seed=args.seed,
         max_prompt_length=args.max_prompt_length,
         max_completion_length=args.max_completion_length,
@@ -395,6 +443,8 @@ def main():
     torch.save(to_save, mm_path)
     model.tokenizer.save_pretrained(final_dir)
     logger.info(f"Saved LoRA to {lora_dir} and mm weights to {mm_path}")
+    if wandb is not None and wandb.run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":
