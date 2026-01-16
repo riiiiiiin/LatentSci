@@ -101,10 +101,16 @@ def extract_fields(example, is_eval: bool = False):
 
     # 提取 SMILES
     raw_val = meta_dict.get("molecule")
-    if raw_val is None:
+    if not raw_val:
         reactants = meta_dict.get("reactants", [])
+        if isinstance(reactants, str):
+            reactants = [reactants]
         reagents = meta_dict.get("reagents", [])
+        if isinstance(reagents, str):
+            reagents = [reagents]
         products = meta_dict.get("products", [])
+        if isinstance(products, str):
+            products = [products]
         raw_val = reactants + reagents + products
 
     if isinstance(raw_val, str):
@@ -195,7 +201,7 @@ def extract_fields(example, is_eval: bool = False):
     if is_eval:
         return {
             "query": query,
-            "input_smiles": input_smiles,
+            "input_smiles": input_smiles or [""],
             "label": None,
             "cot": None,
             "cot_steps": None,
@@ -206,7 +212,7 @@ def extract_fields(example, is_eval: bool = False):
         # LLM 输入的文本 prompt
         "query": query,
         # 分子 SMILES 列表
-        "input_smiles": input_smiles,
+        "input_smiles": input_smiles or [""],
         # LLM 的监督答案
         "label": f"<answer> {label_value} </answer>",
         # Benchmark routing (used by GRPO rewards)
@@ -317,7 +323,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": None,
-            "smiles": example.get("input_smiles"),
+            "smiles": example.get("input_smiles") or "",
         }
 
     # 根据参数决定是否包含 CoT
@@ -365,7 +371,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "smiles": example.get("input_smiles"),
+        "smiles": example.get("input_smiles") or "",
     }
 
 
