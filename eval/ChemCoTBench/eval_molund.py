@@ -45,7 +45,7 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     
     return my_dict
     
-def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir):
+def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir, num_samples):
     logger = logging.getLogger(__name__)
     task_dict = dict(
         fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',

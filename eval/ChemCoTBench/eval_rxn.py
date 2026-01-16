@@ -92,7 +92,7 @@ def evaluate_MechSel(model_name: str, gt_path, logs_dir):
     accuracy = sum(1 for pred, gt in zip(preds, gts) if pred == gt) / len(gts)
     return {"MCQ Accuracy (mean)": accuracy, "valid_rate": 1 - invalid_num / len(preds)}
 
-def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str, results_dir):
+def evaluate_rxn_score(model_name: str, gt_path: str , logs_dir: str, results_dir, num_samples):
     all_results = {}
     subtasks = subtask_to_result_key.keys()
     for subtask in subtasks:

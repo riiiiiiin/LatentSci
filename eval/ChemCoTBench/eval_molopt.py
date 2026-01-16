@@ -24,7 +24,7 @@ def eval_molopt_from_list(optimized_prop, gt_list, pred_list, total_number):
     
     return result_dict
     
-def evaluate_molopt_score(model_name, gt_path, logs_dir, results_dir):
+def evaluate_molopt_score(model_name, gt_path, logs_dir, results_dir, num_samples):
     ## 在get_molopt_cot中得到test结果, 我们评测这些test结果
     prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', jnk='jnk3', gsk='gsk3b')
     # prop_dict = dict(logp='logp', solubility='solubility', qed="qed",  drd='drd2', gsk='gsk3b')
