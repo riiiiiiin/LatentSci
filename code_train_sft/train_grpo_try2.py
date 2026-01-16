@@ -73,7 +73,15 @@ class TerminalRewardPlotCallback(TrainerCallback):
         plt.show()
 
 
-def _ensure_lora_and_trainables(model: Qwen3MoleculeLLM):
+def _ensure_lora_and_trainables(
+    model: Qwen3MoleculeLLM,
+    *,
+    freeze_llm: bool = False,
+    freeze_projector: bool = False,
+    freeze_bio_updater: bool = False,
+    freeze_bio_thinker: bool = False,
+    freeze_task_thinker: bool = False,
+):
     """
     Make sure LoRA is enabled on the underlying text model, and that the multimodal heads are trainable.
     Mirrors the training intent of `train_stage3.py`, but for GRPO.
@@ -95,26 +103,33 @@ def _ensure_lora_and_trainables(model: Qwen3MoleculeLLM):
         )
         model.model = get_peft_model(model.model, lora_config)
 
-    # IMPORTANT: we froze everything above, which also freezes LoRA params loaded from checkpoint.
-    # GRPO needs the policy parameters (LoRA adapters) to require grad; otherwise loss will be detached.
-    lora_param_count = 0
-    for name, p in model.model.named_parameters():
-        if "lora_" in name or "modules_to_save" in name:
-            p.requires_grad = True
-            lora_param_count += p.numel()
-    if lora_param_count == 0:
-        logger.warning("No LoRA parameters were marked trainable; GRPO may fail (detached loss).")
+    # LLM / LoRA trainability
+    if not freeze_llm:
+        # IMPORTANT: we froze everything above, which also freezes LoRA params loaded from checkpoint.
+        # GRPO needs the policy parameters (LoRA adapters) to require grad; otherwise loss will be detached.
+        lora_param_count = 0
+        for name, p in model.model.named_parameters():
+            if "lora_" in name or "modules_to_save" in name:
+                p.requires_grad = True
+                lora_param_count += p.numel()
+        if lora_param_count == 0:
+            logger.warning("No LoRA parameters were marked trainable; GRPO may fail (detached loss).")
+    else:
+        logger.info("freeze_llm=True: keeping all LLM / LoRA parameters frozen.")
 
-    # Multimodal heads trainable
-    for p in model.projector.parameters():
-        p.requires_grad = True
-    for p in model.bio_updater.parameters():
-        p.requires_grad = True
+    # Multimodal heads trainability
+    if not freeze_projector:
+        for p in model.projector.parameters():
+            p.requires_grad = True
+    if not freeze_bio_updater:
+        for p in model.bio_updater.parameters():
+            p.requires_grad = True
+
     if getattr(model, "is_both_latent", False):
-        if hasattr(model, "bio_thinker"):
+        if hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
             for p in model.bio_thinker.parameters():
                 p.requires_grad = True
-        if hasattr(model, "task_thinker"):
+        if hasattr(model, "task_thinker") and (not freeze_task_thinker):
             for p in model.task_thinker.parameters():
                 p.requires_grad = True
 
@@ -189,6 +204,38 @@ def main():
         help="Include `reward_stage4_double_scaled_correctness` in reward functions (uses `task_latent_count` + `cot_len`).",
     )
     parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
+
+    # Freeze switches (mirrors train_stage3.py)
+    parser.add_argument(
+        "--freeze_llm",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the text LLM weights (including any loaded LoRA adapters).",
+    )
+    parser.add_argument(
+        "--freeze_projector",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the multi-modal projector module.",
+    )
+    parser.add_argument(
+        "--freeze_bio_updater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater module (memory update).",
+    )
+    parser.add_argument(
+        "--freeze_bio_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_thinker module.",
+    )
+    parser.add_argument(
+        "--freeze_task_thinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the task_thinker module.",
+    )
 
     # Load starting weights (optional)
     parser.add_argument("--lora_path", type=str, default=None, help="Initial LoRA weights folder (optional)")
@@ -344,7 +391,14 @@ def main():
         model = load_trained_components_stage3(model, args.lora_path, args.projector_path)
 
     # 3) Ensure trainables
-    _ensure_lora_and_trainables(model)
+    _ensure_lora_and_trainables(
+        model,
+        freeze_llm=bool(args.freeze_llm),
+        freeze_projector=bool(args.freeze_projector),
+        freeze_bio_updater=bool(args.freeze_bio_updater),
+        freeze_bio_thinker=bool(args.freeze_bio_thinker),
+        freeze_task_thinker=bool(args.freeze_task_thinker),
+    )
 
     # 4) Dataset
     train_dataset = load_grpo_data(args.data_path)
