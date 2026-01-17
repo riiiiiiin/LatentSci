@@ -140,14 +140,12 @@ class MolSimiliarityTaskEvaluator(BaseTaskEvaluator):
         meta = json.loads(meta)
         return meta['reference']
     
-    @abstractmethod
     def evaluate_predictions(self, preds: List[List[str]], gts: List[Any], total_len: int, metadata: Optional[List[List[Dict[str, Any]]]] = None) -> Dict[str, float]:
         res = self.evaluator.evaluate(preds, gts)
         fts = (res['rdk_sims'] + res['maccs_sims'] + res['morgan_sims']) / 3
         res['fts'] = fts
         return res
     
-    @abstractmethod
     def prepare_metadata(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         return None
     
