@@ -365,25 +365,23 @@ class MolEditEvaluator(BaseTaskEvaluator):
         return ""
     def prepare_metadata(self, sample):
         meta = json.loads(sample['meta'])
-        meta['task'] = sample['subtask']
         return meta
     
-    def evaluate_predictions(self, preds, gts, total_len, metadata = None):
+    def evaluate_predictions(self, preds, gts, total_len, metadata = None, task_name = None):
         correct_num = 0
         if len(preds) == 0:
             return{
                 "correct_rate": 0,
                 "valid-rate": 0
             }
-        task = metadata[0]['task']
         for i in range(len(preds)):
-            if task in ['add']:
+            if task_name in ['add']:
                 if check_edit_add_valid(src=metadata[i]['molecule'], tgt=preds[i], group=metadata[i]['added_group']):
                     correct_num += 1
-            if task in ['delete']:
+            if task_name in ['delete']:
                 if check_edit_del_valid(src=metadata[i]['molecule'], tgt=preds[i], group=metadata[i]['removed_group']):
                     correct_num += 1
-            if task == 'sub':
+            if task_name == 'sub':
                 if check_edit_sub_valid(src=metadata[i]['molecule'], tgt=preds[i], remove_group=metadata[i]['removed_group'], add_group=metadata[i]['added_group']):
                     correct_num += 1
         
@@ -400,7 +398,7 @@ def evaluate_moledit_score(model_name, gt_path, logs_dir, results_dir, sample_co
     for task in ['add', 'delete', 'sub']:
         logger.info(f'evaluating {task} for model {model_name}')
         
-        result_dict[task] = evaluator.run(model_name, sample_count, gt_path, logs_dir, task)
+        result_dict[task] = evaluator.evaluate_score(model_name, sample_count, gt_path, logs_dir, task)
     
     logger.info(f"eval_score_{model_name}_moledit:\n\r{result_dict}")
     os.makedirs(f"{results_dir}/moledit", exist_ok=True)
