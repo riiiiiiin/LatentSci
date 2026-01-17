@@ -13,8 +13,11 @@ metric_of_interest = ['correct_rate',
                       'exact_match', 'fts']
 
 def eval_single_pair(task_name, dir, model_A, model_B):
-    df_A = pd.read_csv(os.path.join(dir, 'eval_results_' + model_A + '.csv'))
-    df_B = pd.read_csv(os.path.join(dir, 'eval_results_' + model_B + '.csv'))
+    try:
+        df_A = pd.read_csv(os.path.join(dir, 'eval_results_' + model_A + '.csv'))
+        df_B = pd.read_csv(os.path.join(dir, 'eval_results_' + model_B + '.csv'))
+    except:
+        return 0, 0
 
     win_count = 0
     tie_count = 0
@@ -29,8 +32,13 @@ def eval_single_pair(task_name, dir, model_A, model_B):
             tie_count += (series_A == series_B).sum()
             loss_count += (series_A > series_B if desc else series_A < series_B).sum()
             count += len(series_A)
-            
-    print(win_count, tie_count, loss_count, count)
+    
+    non_tie_count = win_count + loss_count
+    if non_tie_count == 0:
+        print(task_name, 'No non-tie cases')
+        return 0, 0
+    print(task_name ,win_count * 1.0 / non_tie_count, loss_count * 1.0 / non_tie_count)
+    return win_count, loss_count
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -49,6 +57,13 @@ if __name__ == '__main__':
         if not subtask_name in all_task_names:
             all_task_names.append(subtask_name)
             all_task_dirs.append(subtask_path)
-        
+    
+    total_win_count = 0
+    total_loss_count = 0
     for task, dir in zip(all_task_names, all_task_dirs):
-        eval_single_pair(task, dir, args.model_A, args.model_B)
+        win_count, loss_count = eval_single_pair(task, dir, args.model_A, args.model_B)
+        
+        total_win_count += win_count
+        total_loss_count += loss_count
+        
+    print(total_win_count, total_loss_count)
