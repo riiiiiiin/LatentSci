@@ -358,7 +358,7 @@ def calculate_molecular_similarity(mol1, mol2, fingerprint_type='Morgan',
 
 from core.task_evaluator import BaseTaskEvaluator
 class MolEditEvaluator(BaseTaskEvaluator):
-    def extract_gt(self, gt_raw_item):
+    def extract_gt(self, gt_raw_item, task):
         '''
         GT is not used for this task, all use meta
         '''

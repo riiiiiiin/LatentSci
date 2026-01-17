@@ -15,11 +15,11 @@ class BaseTaskEvaluator(ABC):
     def __init__(self, logger: logging.Logger = None):
         self.logger = logger or logging.getLogger(__name__)
 
-    def extract_answer(self, pred: str) -> str:
+    def extract_answer(self, pred: str, task: str) -> str:
         return extract_answer(pred)
     
     @abstractmethod
-    def extract_gt(self, gt_raw_item: Any) -> Any:
+    def extract_gt(self, gt_raw_item: Any, task: str) -> Any:
         """从单个 gt_raw[i] 提取 gt（可覆盖）。"""
         raise NotImplementedError
 
@@ -80,7 +80,7 @@ class BaseTaskEvaluator(ABC):
             if 'result' in sample:
                 if sample_count > 1:
                     raise ValueError("sample_count should be 1 when result is in sample")
-                pred = self.extract_answer(sample['result'])
+                pred = self.extract_answer(sample['result'], task_name)
                 if pred is None:
                     invalid_num += 1
                     continue
@@ -96,7 +96,7 @@ class BaseTaskEvaluator(ABC):
                     invalid_num += 1
                     continue
                 for j in range(sample_count):
-                    pred = self.extract_answer(results[j])
+                    pred = self.extract_answer(results[j], task_name)
                     if pred is None:
                         pred = ""
                         invalid_num += 1
@@ -105,13 +105,13 @@ class BaseTaskEvaluator(ABC):
             else:
                 raise ValueError("sample should have either 'result' or 'results'")
             
-            gts.append(self.extract_gt(gt_raw[i]))
+            gts.append(self.extract_gt(gt_raw[i], task_name))
             metadata.append(self.prepare_metadata(gt_raw[i]))
 
         # 对每个采样集合计算指标
         res_list: List[Dict[str, float]] = []
         for i in range(sample_count):
-            res = self.evaluate_predictions(preds[i], gts, len(samples), metadata)
+            res = self.evaluate_predictions(preds[i], gts, len(samples), metadata, task_name)
             res_list.append(res)
 
         # 计算 mean 与 std
@@ -131,109 +131,109 @@ class BaseTaskEvaluator(ABC):
 
         return final_res
     
-    @abstractmethod
-    def record_single_result(self, pred: Optional[str], gt: Optional[Any], metadata: Any) -> Dict[str, Any]:
-        raise NotImplementedError
+    # @abstractmethod
+    # def record_single_result(self, pred: Optional[str], gt: Optional[Any], metadata: Any) -> Dict[str, Any]:
+    #     raise NotImplementedError
 
-    def record_metrics(
-        self,
-        model_name: str,
-        sample_count: int,
-        gt_path: str,
-        logs_dir: str,
-        task_name: str,
-    ) -> List[pd.DataFrame]:
+    # def record_metrics(
+    #     self,
+    #     model_name: str,
+    #     sample_count: int,
+    #     gt_path: str,
+    #     logs_dir: str,
+    #     task_name: str,
+    # ) -> List[pd.DataFrame]:
 
-        log_dir = os.path.join(logs_dir, task_name)
-        if not os.path.exists(log_dir):
-            self.logger.warning(f"log not found: {log_dir}")
-            # 返回空的 DataFrame 或 list（基于 sample_count）
-            return []
+    #     log_dir = os.path.join(logs_dir, task_name)
+    #     if not os.path.exists(log_dir):
+    #         self.logger.warning(f"log not found: {log_dir}")
+    #         # 返回空的 DataFrame 或 list（基于 sample_count）
+    #         return []
         
-        samples = self._load_samples(log_dir, model_name)
-        gt_raw = self._load_gt_raw(gt_path, task_name)
+    #     samples = self._load_samples(log_dir, model_name)
+    #     gt_raw = self._load_gt_raw(gt_path, task_name)
 
-        if len(samples) != len(gt_raw):
-            raise ValueError(f"sample count {len(samples)} does not match gt count {len(gt_raw)}")
+    #     if len(samples) != len(gt_raw):
+    #         raise ValueError(f"sample count {len(samples)} does not match gt count {len(gt_raw)}")
 
-        # 每个 sample_index 对应一组行（list of dict）
-        rows_per_index: List[List[Dict[str, Optional[float]]]] = [[] for _ in range(sample_count)]
-        metric_name_order: List[str] = []
+    #     # 每个 sample_index 对应一组行（list of dict）
+    #     rows_per_index: List[List[Dict[str, Optional[float]]]] = [[] for _ in range(sample_count)]
+    #     metric_name_order: List[str] = []
 
-        for i, sample in enumerate(samples):
-            # 保护式获取 gt 与 metadata
-            gt = self.extract_gt(gt_raw[i])
-            metadata = self.prepare_metadata(gt_raw[i])
+    #     for i, sample in enumerate(samples):
+    #         # 保护式获取 gt 与 metadata
+    #         gt = self.extract_gt(gt_raw[i])
+    #         metadata = self.prepare_metadata(gt_raw[i])
 
-            # 处理单预测格式
-            if 'result' in sample:
-                if sample_count > 1:
-                    raise ValueError("sample_count should be 1 when result is in sample")
-                pred = self.extract_answer(sample['result'])
+    #         # 处理单预测格式
+    #         if 'result' in sample:
+    #             if sample_count > 1:
+    #                 raise ValueError("sample_count should be 1 when result is in sample")
+    #             pred = self.extract_answer(sample['result'])
 
-                single = self.record_single_result(pred, gt, metadata) or {}
+    #             single = self.record_single_result(pred, gt, metadata) or {}
 
-                # 维护 metric 名顺序
-                for k in single.keys():
-                    if k not in metric_name_order:
-                        metric_name_order.append(k)
-                rows_per_index[0].append(single)
+    #             # 维护 metric 名顺序
+    #             for k in single.keys():
+    #                 if k not in metric_name_order:
+    #                     metric_name_order.append(k)
+    #             rows_per_index[0].append(single)
 
-            # 处理多预测格式
-            elif 'results' in sample:
-                if sample_count == 1:
-                    raise ValueError("sample_count should be greater than 1 when results is in sample")
-                results = sample['results']
-                if isinstance(results, str):
-                    try:
-                        results = json.loads(results)
-                    except Exception as e:
-                        self.logger.debug(f"failed to json.loads results at index {i}: {e}")
-                        # 对该 sample 的每个期望预测记录 None
-                        for k_idx in range(sample_count):
-                            rows_per_index[k_idx].append(single)
-                        continue
+    #         # 处理多预测格式
+    #         elif 'results' in sample:
+    #             if sample_count == 1:
+    #                 raise ValueError("sample_count should be greater than 1 when results is in sample")
+    #             results = sample['results']
+    #             if isinstance(results, str):
+    #                 try:
+    #                     results = json.loads(results)
+    #                 except Exception as e:
+    #                     self.logger.debug(f"failed to json.loads results at index {i}: {e}")
+    #                     # 对该 sample 的每个期望预测记录 None
+    #                     for k_idx in range(sample_count):
+    #                         rows_per_index[k_idx].append(single)
+    #                     continue
 
-                # 若结果长度与 sample_count 不一致，则为每个期望位置记录 None
-                if not isinstance(results, list) or len(results) != sample_count:
-                    self.logger.debug(f"results length mismatch at index {i}: expected {sample_count}, got {len(results) if isinstance(results, list) else type(results)}")
-                    for k_idx in range(sample_count):
-                        rows_per_index[k_idx].append(single)
-                    continue
+    #             # 若结果长度与 sample_count 不一致，则为每个期望位置记录 None
+    #             if not isinstance(results, list) or len(results) != sample_count:
+    #                 self.logger.debug(f"results length mismatch at index {i}: expected {sample_count}, got {len(results) if isinstance(results, list) else type(results)}")
+    #                 for k_idx in range(sample_count):
+    #                     rows_per_index[k_idx].append(single)
+    #                 continue
 
-                # 正常处理每个预测
-                for j in range(sample_count):
-                    try:
-                        pred = self.extract_answer(results[j])
-                    except Exception as e:
-                        self.logger.debug(f"extract_answer failed (results[{j}]) for index {i}: {e}")
-                        pred = None
+    #             # 正常处理每个预测
+    #             for j in range(sample_count):
+    #                 try:
+    #                     pred = self.extract_answer(results[j])
+    #                 except Exception as e:
+    #                     self.logger.debug(f"extract_answer failed (results[{j}]) for index {i}: {e}")
+    #                     pred = None
 
-                    single = self.record_single_result(pred, gt, metadata) or {}
-                    rows_per_index[j].append(single)
+    #                 single = self.record_single_result(pred, gt, metadata) or {}
+    #                 rows_per_index[j].append(single)
 
-            else:
-                raise ValueError("sample should have either 'result' or 'results'")
+    #         else:
+    #             raise ValueError("sample should have either 'result' or 'results'")
 
-        # 将 rows 转为 DataFrame（按 metric_name_order 列顺序）
-        dataframes: List[pd.DataFrame] = []
-        for idx in range(sample_count):
-            rows = rows_per_index[idx]
-            if not rows:
-                # 空表，保持列信息（如果已有 metric_name_order）
-                if metric_name_order:
-                    df = pd.DataFrame(columns=metric_name_order)
-                else:
-                    df = pd.DataFrame()
-            else:
-                df = pd.DataFrame(rows)
-                # 保证列顺序，缺失列会被创建为 NaN
-                if metric_name_order:
-                    # 将现有列 reindex 到 metric_name_order 顺序（新增列保持 NaN）
-                    df = df.reindex(columns=metric_name_order)
-            dataframes.append(df)
+    #     # 将 rows 转为 DataFrame（按 metric_name_order 列顺序）
+    #     dataframes: List[pd.DataFrame] = []
+    #     for idx in range(sample_count):
+    #         rows = rows_per_index[idx]
+    #         if not rows:
+    #             # 空表，保持列信息（如果已有 metric_name_order）
+    #             if metric_name_order:
+    #                 df = pd.DataFrame(columns=metric_name_order)
+    #             else:
+    #                 df = pd.DataFrame()
+    #         else:
+    #             df = pd.DataFrame(rows)
+    #             # 保证列顺序，缺失列会被创建为 NaN
+    #             if metric_name_order:
+    #                 # 将现有列 reindex 到 metric_name_order 顺序（新增列保持 NaN）
+    #                 df = df.reindex(columns=metric_name_order)
+    #         dataframes.append(df)
 
-        return dataframes
+    #     return dataframes
 
 class MolSimiliarityTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
@@ -260,7 +260,7 @@ class TextSimiliarityTaskEvaluator(BaseTaskEvaluator):
         from core.evaluator import MoleculeCaptionEvaluator
         self.evaluator = MoleculeCaptionEvaluator()
         
-    def extract_gt(self, gt_raw_item):
+    def extract_gt(self, gt_raw_item, task):
         return gt_raw_item['gt']
     
     def evaluate_predictions(self, preds, gts, total_len, metadata = None, task_name = None):
@@ -271,22 +271,28 @@ class TextSimiliarityTaskEvaluator(BaseTaskEvaluator):
         return None
 
 class AllCoTTextSimiliarityTaskEvaluator(TextSimiliarityTaskEvaluator):
-    def extract_answer(self, pred):
+    def extract_answer(self, pred, task):
         return pred
     
-    def extract_gt(self, gt_raw_item):
+    def extract_gt(self, gt_raw_item, task):
         return gt_raw_item['cot_reference']
 
-class ExactMatchTaskEvaluator(BaseTaskEvaluator):
+class TextExactMatchTaskEvaluator(BaseTaskEvaluator):
     def __init__(self):
         super().__init__()
 
-    def extract_gt(self, gt_raw_item):
+    def extract_gt(self, gt_raw_item, task):
         return gt_raw_item['gt']
 
     def evaluate_predictions(self, preds, gts, total_len, metadata = None, task_name = None):
-        res = self.evaluator.evaluate(preds, gts)
-        return res
-
+        def match(pred, gt):
+            if (not pred) or (not gt):
+                return None
+            return pred.lower() == gt.lower()
+        res = [match(pred, gt) for pred, gt in zip(preds, gts)]
+        return {
+            "accuracy": sum([1 for r in res if r]) / total_len,
+            "valid-rate": sum([1 for r in res if r is not None]) / total_len
+        }
     def prepare_metadata(self, sample):
         return None

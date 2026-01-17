@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any, Dict, List
 import logging
 import glob
+from argparse import ArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +62,21 @@ def build_grouped_save_data(
         task_path = os.path.join(task_dir, f'{log_name}.json')
         with open(task_path, 'w') as f:
             json.dump(group, f, ensure_ascii=False, indent=4)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument('--result_path', type=str, required=True)
+    parser.add_argument('--log_name', type=str, required=True)
+    parser.add_argument('--dataset_paths', type=str, nargs='+', required=True)
+    args = parser.parse_args()
+
+    result_path = args.result_path
+    log_name = args.log_name
+    dataset_paths = args.dataset_paths
+
+    current_file = os.path.abspath(__file__)
+    current_dir = os.path.dirname(current_file)
+    logs_dir = os.path.join(current_dir, 'logs')
+
+    os.makedirs(logs_dir, exist_ok=True)
+    build_grouped_save_data(result_path, logs_dir, log_name)

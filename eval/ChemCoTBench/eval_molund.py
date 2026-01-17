@@ -6,6 +6,8 @@ from ChemCoTBench.core.eval_metric import mol_opt_evaluater
 from core.utils import extract_answer
 import regex as re
 
+logger = logging.getLogger(__name__)
+
 def eval_molund_from_list(gt_list, pred_list, total_number, task):
     # this_function input: 
     #   gt_list for gt_molecules
@@ -44,45 +46,43 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     }
     
     return my_dict
+
+from core.task_evaluator import BaseTaskEvaluator
+class MolUndEvaluator(BaseTaskEvaluator):
+    def extract_gt(self, gt_raw_item, task):
+        return gt_raw_item['gt']
     
-def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir, num_samples):
-    logger = logging.getLogger(__name__)
-    task_dict = dict(
-        fg_samples="fg_count", murcko='Murcko_scaffold', ring_count='ring_count',
-        ring_system='ring_system_scaffold', equivalence = 'equivalence'
-    )
+    def extract_answer(self, pred, task):
+        answer = extract_answer(pred)
+        if task in ["ring_count", "fg_samples", "fg_count"]:
+            try:
+                answer = abs(int(re.sub(r'\D', '', answer)))
+            except:
+                return None
+        return answer
+    
+    def prepare_metadata(self, sample):
+        return None
+    
+    def evaluate_predictions(self, preds, gts, total_len, metadata = None, task_name = None):
+        return eval_molund_from_list(gt_list=gts, pred_list=preds, total_number=total_len, task=task_name)
+
+def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir, sample_count):
+    tasks = {
+        "fg_count",
+        'Murcko_scaffold',
+        'ring_count',
+        'ring_system_scaffold',
+        'equivalence'
+    }
     
     result_dict = dict()
+    evaluator = MolUndEvaluator()
     
-    for task in task_dict.keys():
+    for task in tasks:
         logger.info(f'evaluating {task} for model {model_name}')
-        if 'llama' not in model_name:
-            file_name = f"{logs_dir}/{task_dict[task]}/{model_name}.json"
-            
-        pred_results = json.load(open(file_name, "r"))
-        invalid_number = 0
         
-        gt_name = f"{gt_path}/{task_dict[task]}.json"
-        gts = json.load(open(gt_name, "r"))
-        
-        pred_list, gt_list = list(), list()
-        for i, pred in enumerate(pred_results):
-            answer = extract_answer(pred['result'])
-            if answer is None:
-                invalid_number += 1
-                continue
-            if task in task in ["ring_count", "fg_samples", "fg_count"]:
-                try:
-                    answer = abs(int(re.sub(r'\D', '', answer)))
-                except:
-                    invalid_number += 1
-                    continue
-            pred_list.append(answer)
-            gt_list.append(gts[i]['gt'])
-        
-        assert len(pred_results) == invalid_number+len(pred_list)
-        result_dict[task] = eval_molund_from_list(gt_list=gt_list, pred_list=pred_list, total_number=len(pred_results), task=task)
-        logger.debug(model_name, task, result_dict[task])
+        result_dict[task] = evaluator.evaluate_score(model_name, sample_count, gt_path, logs_dir, task)
     
     logger.info(f"eval_score_{model_name}_molund:\n\r{result_dict}")
     os.makedirs(f"{results_dir}/molund", exist_ok=True)
