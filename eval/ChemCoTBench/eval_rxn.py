@@ -65,3 +65,17 @@ def evaluate_rxn_score(model_name: str, gt_path: str, logs_dir: str, results_dir
     json.dump(all_results, open(f"{results_dir}/rxn/eval_score_{model_name}.json", "w"), indent=4)
 
     return all_results
+        
+def record_rxn_score(model_name, gt_path, logs_dir, results_dir, sample_count = 1):
+    rxn_evaluator = RxnEvaluator()
+    mechsel_evaluator = MechSelEvaluator()
+    for task in subtask_to_result_key.keys():
+        logger.info(f'recording {task} for model {model_name}')
+    
+        if task == 'MechSel' or task == 'mechsel':
+            dataframe = mechsel_evaluator.record_results(model_name, sample_count, gt_path, logs_dir, task)
+        else:
+            dataframe = rxn_evaluator.record_results(model_name, sample_count, gt_path, logs_dir, task)
+
+        os.makedirs(f"{results_dir}/rxn/{task}", exist_ok=True)
+        dataframe.to_csv(f"{results_dir}/rxn/{task}/eval_results_{model_name}.csv", index=False)

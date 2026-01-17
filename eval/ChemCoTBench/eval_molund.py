@@ -47,6 +47,14 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     
     return my_dict
 
+tasks = {
+    "fg_count",
+    'Murcko_scaffold',
+    'ring_count',
+    'ring_system_scaffold',
+    'equivalence'
+}
+
 from core.task_evaluator import BaseTaskEvaluator
 class MolUndEvaluator(BaseTaskEvaluator):
     def extract_gt(self, gt_raw_item, task):
@@ -68,14 +76,6 @@ class MolUndEvaluator(BaseTaskEvaluator):
         return eval_molund_from_list(gt_list=gts, pred_list=preds, total_number=total_len, task=task_name)
 
 def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir, sample_count):
-    tasks = {
-        "fg_count",
-        'Murcko_scaffold',
-        'ring_count',
-        'ring_system_scaffold',
-        'equivalence'
-    }
-    
     result_dict = dict()
     evaluator = MolUndEvaluator()
     
@@ -88,4 +88,14 @@ def evaluate_molund_score(model_name, gt_path, logs_dir, results_dir, sample_cou
     os.makedirs(f"{results_dir}/molund", exist_ok=True)
     json.dump(result_dict, open(f"{results_dir}/molund/eval_score_{model_name}.json", "w"), indent=4)
     
-    return result_dict        
+    return result_dict      
+        
+def record_molund_results(model_name, gt_path, logs_dir, results_dir, sample_count = 1):
+    evaluator = MolUndEvaluator()
+    for task in tasks:
+        logger.info(f'recording {task} for model {model_name}')
+
+        dataframe = evaluator.record_results(model_name, sample_count, gt_path, logs_dir, task)
+
+        os.makedirs(f"{results_dir}/molund/{task}", exist_ok=True)
+        dataframe.to_csv(f"{results_dir}/molund/{task}/eval_results_{model_name}.csv", index=False)

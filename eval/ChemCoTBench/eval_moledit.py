@@ -405,3 +405,13 @@ def evaluate_moledit_score(model_name, gt_path, logs_dir, results_dir, sample_co
     json.dump(result_dict, open(f"{results_dir}/moledit/eval_score_{model_name}.json", "w"), indent=4)
     
     return result_dict
+
+def record_moledit_results(model_name, gt_path, logs_dir, results_dir, sample_count = 1):
+    evaluator = MolEditEvaluator()
+    for task in ['add', 'delete', 'sub']:
+        logger.info(f'recording {task} for model {model_name}')
+        
+        dataframe = evaluator.record_results(model_name, sample_count, gt_path, logs_dir, task)
+        
+        os.makedirs(f"{results_dir}/moledit/{task}", exist_ok=True)
+        dataframe.to_csv(f"{results_dir}/moledit/{task}/eval_results_{model_name}.csv", index=False)
