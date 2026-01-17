@@ -132,6 +132,8 @@ class BaseTaskEvaluator(ABC):
         return final_res
     
     def record_single_result(self, pred: Optional[str], gt: Optional[Any], metadata: Any, task_name: str) -> Dict[str, Any]:
+        if pred is None or gt is None:
+            return {}
         return self.evaluate_predictions([pred], [gt], 1, [metadata], task_name)
 
     def record_results(

@@ -48,9 +48,15 @@ for dataset_path in dataset_paths:
         eval_all_ChemCoTDataset_textwise(log_name, dataset_path, logs_dir, results_dir, num_samples)
         
     if 'ChEBI' in dataset_path:
-        from ChEBI20.eval_all import eval_all_ChEBI20
-        eval_all_ChEBI20(log_name, dataset_path, logs_dir, results_dir, num_samples)
+        from ChEBI20.eval_all import eval_all_ChEBI20, record_all_ChEBI20
+        if mode == 'score':
+            eval_all_ChEBI20(log_name, dataset_path, logs_dir, results_dir, num_samples)
+        elif mode == 'record':
+            record_all_ChEBI20(log_name, dataset_path, logs_dir, records_dir, num_samples)
         
     if 'InstructMol' in dataset_path:
-        from InstructMol.eval_all import eval_all_InstructMol
-        eval_all_InstructMol(log_name, dataset_path, logs_dir, results_dir, num_samples)
+        from InstructMol.eval_all import eval_all_InstructMol, record_all_InstructMol
+        if mode == 'score':
+            eval_all_InstructMol(log_name, dataset_path, logs_dir, results_dir, num_samples)
+        elif mode == 'record':
+            record_all_InstructMol(log_name, dataset_path, logs_dir, records_dir, num_samples)

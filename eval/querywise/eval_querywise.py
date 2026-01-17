@@ -5,12 +5,25 @@ from pathlib import Path
 import argparse
 
 def is_desc(task_name, metric_name):
-    return task_name in ['ring_count', 'fg_count'] and metric_name == 'score'
+    desc = False
+    # ChemCoTBench
+    desc = desc or task_name in ['ring_count', 'fg_count'] and metric_name == 'score'
+    desc = desc or metric_name == 'levenshtein'
+    return desc
 
-metric_of_interest = ['correct_rate',
-                      'mean', 'success_rate',
-                      'score',
-                      'exact_match', 'fts']
+# ChemCoTBench
+# metric_of_interest = ['correct_rate',
+#                       'mean', 'success_rate',
+#                       'score',
+#                       'exact_match', 'fts']
+
+# InstructMol
+metric_of_interest = ['exact_match',
+                      'bleu', 'levenshtein',
+                      'rdk_sims', 'maccs_sims', 'morgan_sims',
+                      'validity',
+                      'bleu-2', 'bleu-4', 'meteor',
+                      'rouge-1', 'rouge-2', 'rouge-L']
 
 def eval_single_pair(task_name, dir, model_A, model_B):
     try:
