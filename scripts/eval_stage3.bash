@@ -3,8 +3,42 @@ set -euo pipefail
 # =========================
 # exp
 # =========================
-EXP_NAME=<exp_name>
-CKPT_DIR_NAME=<ckpt_name>
+
+EXP_NAME=""
+CKPT_DIR=""
+TEMPERATURE=0.7
+IS_BOTH_LATENT=true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --exp-name)
+      EXP_NAME="$2"
+      shift 2
+      ;;
+    --ckpt-dir)
+      CKPT_DIR="$2"
+      shift 2
+      ;;
+    --temperature)
+      TEMPERATURE="$2"
+      shift 2
+      ;;
+    --is-both-latent)
+      IS_BOTH_LATENT="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${EXP_NAME}" || -z "${CKPT_DIR}" ]]; then
+  echo "Usage: $0 --exp-name <EXP_NAME> --ckpt-dir <CKPT_DIR> [--temperature <TEMPERATURE>] [--is-both-latent <IS_BOTH_LATENT>]"
+  exit 1
+fi
+
 DATASET_NAME=ChemCoTBench
 INCLUDE_TASKS=""
 CUDA_DEVICES=0,1
@@ -15,14 +49,12 @@ CUDA_DEVICES=0,1
 BATCH_SIZE=4
 NUM_RETURN_SEQUENCES=1
 MAX_NEW_TOKENS=2048
-TEMPERATURE=0.7
 TOP_P=0.9
 MAX_SEQ_LENGTH=8192
 
 # Stage-3 specific
 TRAINING_STAGE=3
 C_THOUGHT=2
-IS_BOTH_LATENT=true
 BIO_LATENT_LAMBDA=0.0
 BIO_LATENT_ALPHA=0.5
 MAX_COT_STRING_LEN=2048
@@ -34,7 +66,6 @@ MAX_TEST_SAMPLES=""
 # =========================
 SCRIPT_PATH="code_train_sft/inference.py"
 OUTPUT_DIR="outputs/${EXP_NAME}"
-CKPT_DIR="outputs/${CKPT_DIR_NAME}"
 LORA_PATH="${CKPT_DIR}/lora_weights"
 PROJECTOR_PATH="${CKPT_DIR}/mm_projector.pt"
 DATA_PATH="data/${DATASET_NAME}"
@@ -42,13 +73,13 @@ DATA_PATH="data/${DATASET_NAME}"
 PYTHON_BIN="python"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-LOG_NAME="${EXP_NAME}_${TIMESTAMP}"
+LOG_NAME="${EXP_NAME}_${TIMESTAMP}_${IS_BOTH_LATENT}_${TEMPERATURE}"
 LOG_NAME="${LOG_NAME//\//_}"
+LOG_NAME="${LOG_NAME//./}"
 INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.json"
 
 echo "========== Stage-3 Inference Runner =========="
 echo "EXP_NAME:                  ${EXP_NAME}"
-echo "CKPT_DIR_NAME:             ${CKPT_DIR_NAME}"
 echo "DATASET_NAME:              ${DATASET_NAME}"
 echo "SCRIPT_PATH:               ${SCRIPT_PATH}"
 echo "CKPT_DIR:                  ${CKPT_DIR}"
@@ -182,6 +213,7 @@ EVAL_CMD=(
   --result_path "../${INFERENCE_RESULTS_PATH}"
   --log_name "${LOG_NAME}"
   --dataset_paths "../${DATA_PATH}"
+  --num_samples "${NUM_RETURN_SEQUENCES}"
 )
 
 echo "Running evaluation command:" | tee -a "../${LOG_FILE}"
@@ -195,8 +227,6 @@ else
   popd > /dev/null
   exit 20
 fi
-
-popd > /dev/null
 
 echo "All done."
 echo "Inference results: ${INFERENCE_RESULTS_PATH}"
