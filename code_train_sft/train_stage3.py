@@ -431,6 +431,24 @@ def train_stage3():
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
     )
     parser.add_argument(
+        "--is_biothinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker (bio-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_taskthinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater (memory update) when --is_both_latent is false.",
+    )
+    parser.add_argument(
         "--bio_latent_lambda",
         type=float,
         default=0.0,
@@ -502,6 +520,9 @@ def train_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -516,6 +537,9 @@ def train_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -529,6 +553,9 @@ def train_stage3():
     else: # Stage 3
         is_coconut = bool(args.is_coconut)
         is_both_latent = bool(args.is_both_latent)
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         task_latent_lambda = float(args.task_latent_lambda)
@@ -560,6 +587,9 @@ def train_stage3():
             mol_config=mol_config,
             is_coconut=is_coconut,
             is_both_latent=is_both_latent,
+            is_biothinker=is_biothinker,
+            is_taskthinker=is_taskthinker,
+            is_bioupdater=is_bioupdater,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             task_latent_lambda=task_latent_lambda,
@@ -606,15 +636,18 @@ def train_stage3():
         for param in model.projector.parameters():
             param.requires_grad = not bool(args.freeze_projector)
         
+        bioupdater_enabled = bool(is_both_latent) or bool(is_bioupdater)
         for param in model.bio_updater.parameters():
-            param.requires_grad = not bool(args.freeze_bio_updater)
+            param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
 
         if hasattr(model, "bio_thinker"):
+            biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
             for param in model.bio_thinker.parameters():
-                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_bio_thinker))
+                param.requires_grad = biothinker_enabled and (not bool(args.freeze_bio_thinker))
         if hasattr(model, "task_thinker"):
+            taskthinker_enabled = bool(is_both_latent) or bool(is_taskthinker)
             for param in model.task_thinker.parameters():
-                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_task_thinker))
+                param.requires_grad = taskthinker_enabled and (not bool(args.freeze_task_thinker))
         
         model.model.train()
 

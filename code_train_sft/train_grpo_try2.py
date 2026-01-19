@@ -121,17 +121,21 @@ def _ensure_lora_and_trainables(
     if not freeze_projector:
         for p in model.projector.parameters():
             p.requires_grad = True
-    if not freeze_bio_updater:
+    both_latent = bool(model.is_both_latent)
+    bioupdater_enabled = both_latent or bool(model.is_bioupdater)
+    biothinker_enabled = both_latent or bool(model.is_biothinker)
+    taskthinker_enabled = both_latent or bool(model.is_taskthinker)
+
+    if bioupdater_enabled and (not freeze_bio_updater):
         for p in model.bio_updater.parameters():
             p.requires_grad = True
 
-    if getattr(model, "is_both_latent", False):
-        if hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
-            for p in model.bio_thinker.parameters():
-                p.requires_grad = True
-        if hasattr(model, "task_thinker") and (not freeze_task_thinker):
-            for p in model.task_thinker.parameters():
-                p.requires_grad = True
+    if biothinker_enabled and hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
+        for p in model.bio_thinker.parameters():
+            p.requires_grad = True
+    if taskthinker_enabled and hasattr(model, "task_thinker") and (not freeze_task_thinker):
+        for p in model.task_thinker.parameters():
+            p.requires_grad = True
 
 
 def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_path=None):
@@ -298,6 +302,24 @@ def main():
         help="Enable task-latent generation via is_both_latent (stage=4/5 requires true).",
     )
     parser.add_argument(
+        "--is_biothinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker (bio-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_taskthinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater (memory update) when --is_both_latent is false.",
+    )
+    parser.add_argument(
         "--bio_thinker_dropout",
         type=float,
         default=0.0,
@@ -381,6 +403,9 @@ def main():
         qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
         mol_config=mol_config,
         is_both_latent=use_both_latent,
+        is_biothinker=bool(args.is_biothinker),
+        is_taskthinker=bool(args.is_taskthinker),
+        is_bioupdater=bool(args.is_bioupdater),
         is_coconut=False,
         bio_thinker_dropout=float(args.bio_thinker_dropout),
         task_thinker_dropout=float(args.task_thinker_dropout),
