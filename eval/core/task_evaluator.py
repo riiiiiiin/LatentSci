@@ -81,8 +81,16 @@ class BaseTaskEvaluator(ABC):
                 if sample_count > 1:
                     raise ValueError("sample_count should be 1 when result is in sample")
                 pred = self.extract_answer(sample['result'], task_name)
-                if pred is None:
+                # this is confusing:
+                # None, [], 0.0 or "" are all seen as invalid predictions
+                # But only None will be skipped
+                # This is to be consistent with some benchmarks that calculate scores on every results regardless of their validity
+                # However, valid-rate is used to indicate whether the model is following instructions
+                # By default, extract_answer returns None for any invalid prediction
+                # If you want to change this behavior, you can override extract_answer
+                if not pred:
                     invalid_num += 1
+                if pred is None:
                     continue
                 preds[0].append(pred)
 
