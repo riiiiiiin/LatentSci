@@ -14,8 +14,8 @@ prop_dict = {
     'solubility': 'solubility',
     'qed': 'qed',
     'drd': 'drd2',
-    'gsk': 'gsk3b',
-    'jnk': 'jnk3'
+    'jnk': 'jnk3',
+    'gsk': 'gsk3b'
 }
 class MolOptEvaluator(BaseTaskEvaluator):
     def extract_gt(self, gt_raw_item, task):
