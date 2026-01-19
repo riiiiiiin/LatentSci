@@ -61,6 +61,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     root_dir = Path(args.root_dir)
+    
+    banned_tasks = [
+        'drd',
+        'gsk',
+        'jnk',
+        'nepp'
+    ]
+    
     all_task_names = []
     all_task_dirs = []
     for csv_file in root_dir.rglob('*.csv'):
@@ -74,6 +82,8 @@ if __name__ == '__main__':
     total_win_count = 0
     total_loss_count = 0
     for task, dir in zip(all_task_names, all_task_dirs):
+        if task in banned_tasks:
+            continue
         win_count, loss_count = eval_single_pair(task, dir, args.model_A, args.model_B)
         
         total_win_count += win_count

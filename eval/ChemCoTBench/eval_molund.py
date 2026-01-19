@@ -47,13 +47,13 @@ def eval_molund_from_list(gt_list, pred_list, total_number, task):
     
     return my_dict
 
-tasks = {
+tasks = [
     "fg_count",
     'Murcko_scaffold',
     'ring_count',
     'ring_system_scaffold',
     'equivalence'
-}
+]
 
 from core.task_evaluator import BaseTaskEvaluator
 class MolUndEvaluator(BaseTaskEvaluator):

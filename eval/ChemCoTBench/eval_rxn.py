@@ -40,8 +40,8 @@ class MechSelEvaluator(TextExactMatchTaskEvaluator):
         gt = gt_raw_item['gt'].lower()
         return gt
     
-    def extract_pred(self, pred_raw_item, task):
-        pred = pred_raw_item['result'].lower()
+    def extract_answer(self, pred, task):
+        pred = pred['result'].lower()
         if not pred.isalpha():
             return None
         return pred

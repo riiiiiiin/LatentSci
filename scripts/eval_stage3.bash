@@ -8,6 +8,7 @@ EXP_NAME=""
 CKPT_DIR=""
 TEMPERATURE=0.7
 IS_BOTH_LATENT=true
+TASK_LATENT_MAX_STEPS=10
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --is-both-latent)
       IS_BOTH_LATENT="$2"
+      shift 2
+      ;;
+    --task-latent-max-steps)
+      TASK_LATENT_MAX_STEPS="$2"
       shift 2
       ;;
     *)
@@ -58,7 +63,6 @@ C_THOUGHT=2
 BIO_LATENT_LAMBDA=0.0
 BIO_LATENT_ALPHA=0.5
 MAX_COT_STRING_LEN=2048
-TASK_LATENT_MAX_STEPS=10
 MAX_TEST_SAMPLES=""
 
 # =========================
@@ -73,7 +77,7 @@ DATA_PATH="data/${DATASET_NAME}"
 PYTHON_BIN="python"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-LOG_NAME="${EXP_NAME}_${TIMESTAMP}_${IS_BOTH_LATENT}_${TEMPERATURE}"
+LOG_NAME="${EXP_NAME}_${TIMESTAMP}_${IS_BOTH_LATENT}_${TEMPERATURE}_${DATASET_NAME}_${TASK_LATENT_MAX_STEPS}"
 LOG_NAME="${LOG_NAME//\//_}"
 LOG_NAME="${LOG_NAME//./}"
 INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.json"
