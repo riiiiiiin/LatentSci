@@ -290,8 +290,42 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
     Unified loader for Stage 3: loads LoRA weights and combined Projector + Bio Updater weights.
     Assumes unified multi-modal checkpoint format.
     """
+    def _ensure_exists(path: str, *, kind: str) -> None:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{kind} path does not exist: {path}")
+
+    def _ensure_is_dir(path: str, *, kind: str) -> None:
+        if not os.path.isdir(path):
+            raise NotADirectoryError(f"{kind} path must be a directory: {path}")
+
+    def _ensure_is_file(path: str, *, kind: str) -> None:
+        if not os.path.isfile(path):
+            raise IsADirectoryError(f"{kind} path must be a file: {path}")
+
+    def _require_ckpt_key(ckpt: dict, key: str, *, path: str) -> None:
+        if key not in ckpt:
+            found = ", ".join(sorted(map(str, ckpt.keys())))
+            raise KeyError(f"Checkpoint {path} is missing key '{key}'. Found keys: [{found}]")
+
     # 1. 加载 LoRA 权重
-    if lora_weights_path and os.path.exists(lora_weights_path):
+    if lora_weights_path:
+        _ensure_exists(lora_weights_path, kind="LoRA")
+        _ensure_is_dir(lora_weights_path, kind="LoRA")
+
+        cfg_path = os.path.join(lora_weights_path, "adapter_config.json")
+        if not os.path.isfile(cfg_path):
+            raise FileNotFoundError(f"LoRA folder is missing required file: {cfg_path}")
+        weight_candidates = [
+            os.path.join(lora_weights_path, "adapter_model.safetensors"),
+            os.path.join(lora_weights_path, "adapter_model.bin"),
+            os.path.join(lora_weights_path, "pytorch_model.bin"),
+        ]
+        if not any(os.path.isfile(p) for p in weight_candidates):
+            raise FileNotFoundError(
+                "LoRA folder is missing adapter weights. Expected one of: "
+                + ", ".join(weight_candidates)
+            )
+
         logger.info(f"Loading LoRA weights from: {lora_weights_path}")
         model.model = PeftModel.from_pretrained(
             model.model, 
@@ -300,26 +334,35 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         )
     
     # 2. 加载多模态组合权重 (Projector + Bio Updater)
-    if mm_projector_path and os.path.exists(mm_projector_path):
+    if mm_projector_path:
+        _ensure_exists(mm_projector_path, kind="Multi-modal checkpoint")
+        _ensure_is_file(mm_projector_path, kind="Multi-modal checkpoint")
+
         logger.info(f"Loading unified multi-modal weights from: {mm_projector_path}")
         device = next(model.parameters()).device
         checkpoint = torch.load(mm_projector_path, map_location=device)
-        
-        # 直接按组合格式加载（兼容旧 checkpoint 缺 key）
-        if "projector" in checkpoint:
-            model.projector.load_state_dict(checkpoint["projector"])
-            logger.info("Loaded projector weights.")
-        else:
-            logger.warning("Checkpoint missing 'projector' key, skipped.")
 
-        if "bio_updater" in checkpoint and hasattr(model, "bio_updater"):
+        if not isinstance(checkpoint, dict):
+            raise TypeError(
+                f"Expected checkpoint dict in {mm_projector_path}, got: {type(checkpoint)}"
+            )
+        
+        # 直接按组合格式加载
+        _require_ckpt_key(checkpoint, "projector", path=mm_projector_path)
+        model.projector.load_state_dict(checkpoint["projector"])
+        logger.info("Loaded projector weights.")
+
+        if hasattr(model, "bio_updater"):
+            _require_ckpt_key(checkpoint, "bio_updater", path=mm_projector_path)
             model.bio_updater.load_state_dict(checkpoint["bio_updater"])
             logger.info("Loaded bio_updater weights.")
 
-        if "bio_thinker" in checkpoint and hasattr(model, "bio_thinker"):
+        if hasattr(model, "bio_thinker"):
+            _require_ckpt_key(checkpoint, "bio_thinker", path=mm_projector_path)
             model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
             logger.info("Loaded bio_thinker weights.")
-        if "task_thinker" in checkpoint and hasattr(model, "task_thinker"):
+        if hasattr(model, "task_thinker"):
+            _require_ckpt_key(checkpoint, "task_thinker", path=mm_projector_path)
             model.task_thinker.load_state_dict(checkpoint["task_thinker"])
             logger.info("Loaded task_thinker weights.")
             
@@ -339,7 +382,7 @@ def train_stage3():
     parser.add_argument("--max_latent_stage", type=int, default=3, help="Max number of CoT steps to latent-ize")
     parser.add_argument("--c_thought", type=int, default=2, help="Number of latent tokens per CoT step")
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--grad_accum", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--save_full_model", type=lambda x: (str(x).lower() == 'true'), default=False, help="Whether to save full model weights (default False to save space)")
@@ -378,7 +421,7 @@ def train_stage3():
     parser.add_argument(
         "--is_coconut",
         type=lambda x: (str(x).lower() == "true"),
-        default=True,
+        default=False,
         help="Whether to run Coconut latent training for stage 3 (ignored for stage 1/2).",
     )
     parser.add_argument(
@@ -386,6 +429,24 @@ def train_stage3():
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
+    )
+    parser.add_argument(
+        "--is_biothinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker (bio-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_taskthinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater (memory update) when --is_both_latent is false.",
     )
     parser.add_argument(
         "--bio_latent_lambda",
@@ -459,6 +520,9 @@ def train_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -473,6 +537,9 @@ def train_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -486,6 +553,9 @@ def train_stage3():
     else: # Stage 3
         is_coconut = bool(args.is_coconut)
         is_both_latent = bool(args.is_both_latent)
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         task_latent_lambda = float(args.task_latent_lambda)
@@ -517,6 +587,9 @@ def train_stage3():
             mol_config=mol_config,
             is_coconut=is_coconut,
             is_both_latent=is_both_latent,
+            is_biothinker=is_biothinker,
+            is_taskthinker=is_taskthinker,
+            is_bioupdater=is_bioupdater,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             task_latent_lambda=task_latent_lambda,
@@ -563,15 +636,18 @@ def train_stage3():
         for param in model.projector.parameters():
             param.requires_grad = not bool(args.freeze_projector)
         
+        bioupdater_enabled = bool(is_both_latent) or bool(is_bioupdater)
         for param in model.bio_updater.parameters():
-            param.requires_grad = not bool(args.freeze_bio_updater)
+            param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
 
         if hasattr(model, "bio_thinker"):
+            biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
             for param in model.bio_thinker.parameters():
-                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_bio_thinker))
+                param.requires_grad = biothinker_enabled and (not bool(args.freeze_bio_thinker))
         if hasattr(model, "task_thinker"):
+            taskthinker_enabled = bool(is_both_latent) or bool(is_taskthinker)
             for param in model.task_thinker.parameters():
-                param.requires_grad = bool(is_both_latent) and (not bool(args.freeze_task_thinker))
+                param.requires_grad = taskthinker_enabled and (not bool(args.freeze_task_thinker))
         
         model.model.train()
 

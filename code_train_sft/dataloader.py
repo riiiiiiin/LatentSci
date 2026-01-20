@@ -489,7 +489,11 @@ def load_grpo_data(path):
     # Keep only what GRPO needs
     dataset = dataset.rename_column("query", "prompt")
     dataset = dataset.remove_columns(
-        [c for c in dataset.column_names if c not in ("prompt", "input_smiles", "label", "task", "subtask", "meta")]
+        [
+            c
+            for c in dataset.column_names
+            if c not in ("prompt", "input_smiles", "label", "task", "subtask", "meta", "cot_len")
+        ]
     )
     return dataset
 
