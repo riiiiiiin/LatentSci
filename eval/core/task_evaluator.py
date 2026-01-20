@@ -179,7 +179,9 @@ class BaseTaskEvaluator(ABC):
                 pred = self.extract_answer(sample['result'], task_name)
 
                 single = self.record_single_result(pred, gt, metadata, task_name) or {}
-
+                if isinstance(sample['result'], str):
+                    single['output_length'] = len(sample['result'])
+                
                 # 维护 metric 名顺序
                 for k in single.keys():
                     if k not in metric_name_order:
@@ -217,6 +219,12 @@ class BaseTaskEvaluator(ABC):
                         pred = None
 
                     single = self.record_single_result(pred, gt, metadata, task_name) or {}
+                    if isinstance(results[j], str):
+                        single['output_length'] = len(results[j])
+                    
+                    for k in single.keys():
+                        if k not in metric_name_order:
+                            metric_name_order.append(k)
                     rows_per_index[j].append(single)
 
             else:
