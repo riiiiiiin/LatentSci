@@ -138,6 +138,34 @@ class BioTokenUpdater(nn.Module):
 
 
 # ============================
+# 1b2. Stage 3 BioUpdater Gating: hard gate with straight-through gradients
+# ============================
+class BioUpdaterGate(nn.Linear):
+    def __init__(self, d_llm: int, bias_init: float = 0.1, weight_init_std: float = 1e-3):
+        super().__init__(int(d_llm), 1, bias=True)
+        nn.init.normal_(self.weight, mean=0.0, std=float(weight_init_std))
+        nn.init.constant_(self.bias, float(bias_init))
+
+    def forward(self, states: torch.Tensor, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """
+        states: [B, d]
+        Returns gate: [B, 1, 1] using hard threshold in forward and sigmoid gradients in backward.
+        """
+        if states.dim() != 2:
+            raise ValueError(
+                f"BioUpdaterGate expects a 2D tensor [B, d], got shape={tuple(states.shape)}. "
+                "Slice the token you want (e.g. `latent_states[:, -1, :]`) before calling."
+            )
+        logits = F.linear(states.float(), self.weight.float(), self.bias.float())
+        prob = torch.sigmoid(logits)
+        hard = (prob > 0.5).to(dtype=prob.dtype)
+        gate = hard.detach() - prob.detach() + prob
+        if out_dtype is None:
+            out_dtype = states.dtype
+        return gate.to(dtype=out_dtype).view(-1, 1, 1)
+
+
+# ============================
 # 1c. Bio Thinker: one-pass self-attn block for bio-latent tokens
 # ============================
 class SinusoidalPositionalEncoding(nn.Module):
@@ -318,12 +346,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # ---- Stage 3: Bio Token Updater ----
         self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
         self.bio_updater.to(self.model.dtype)
-        self.bio_updater_gate: Optional[nn.Linear] = None
+        self.bio_updater_gate: Optional[BioUpdaterGate] = None
         if self.is_bioupdater_gating:
-            self.bio_updater_gate = nn.Linear(self.d_llm, 1)
+            self.bio_updater_gate = BioUpdaterGate(self.d_llm, bias_init=0.1)
             self.bio_updater_gate.to(self.model.dtype)
-            nn.init.zeros_(self.bio_updater_gate.weight)
-            nn.init.constant_(self.bio_updater_gate.bias, 1.0)
 
         # ---- Stage 3: Bio Thinker (optional) ----
         self.bio_thinker = BioThinker(
@@ -401,11 +427,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         if self.bio_updater_gate is None:
             raise RuntimeError("is_bioupdater_gating=True but `bio_updater_gate` is not initialized.")
 
-        gate_logits = self.bio_updater_gate(latent_states[:, -1, :])
-        gate_prob = torch.sigmoid(gate_logits)
-        hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
-        gate = hard.detach() - gate_prob.detach() + gate_prob
-        gate = gate.to(dtype=refined.dtype).view(-1, 1, 1)
+        gate = self.bio_updater_gate(latent_states[:, -1, :], out_dtype=refined.dtype)
         return refined * gate + bio_embeds * (1.0 - gate)
 
     def _apply_latent_feedback(
@@ -466,11 +488,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         anchor_states.append(hidden_states[b, anchor_pos])
                     anchor = torch.stack(anchor_states, dim=0).to(dtype=self.model.dtype)  # (B_gate, d)
 
-                    gate_logits = self.bio_updater_gate(anchor)  # (B_gate, 1)
-                    gate_prob = torch.sigmoid(gate_logits)
-                    hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
-                    gate = hard.detach() - gate_prob.detach() + gate_prob
-                    gate = gate.to(dtype=self.model.dtype).view(-1, 1, 1)  # (B_gate, 1, 1)
+                    gate = self.bio_updater_gate(anchor, out_dtype=self.model.dtype)  # (B_gate, 1, 1)
 
                     bioupdater_gate_cache = torch.ones(B, 1, 1, device=anchor.device, dtype=self.model.dtype)
                     bioupdater_gate_cache[torch.tensor(gate_indices, device=anchor.device, dtype=torch.long)] = gate
@@ -1292,11 +1310,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                                     raise RuntimeError(
                                         "is_bioupdater_gating=True but `bio_updater_gate` is not initialized."
                                     )
-                                gate_logits = self.bio_updater_gate(batched_lat[:, -1, :])
-                                gate_prob = torch.sigmoid(gate_logits)
-                                hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
-                                gate = hard.detach() - gate_prob.detach() + gate_prob
-                                bioupdater_gate_cache = gate.to(dtype=batched_bio.dtype).view(-1, 1, 1)
+                                bioupdater_gate_cache = self.bio_updater_gate(
+                                    batched_lat[:, -1, :], out_dtype=batched_bio.dtype
+                                )
                             refined = self.bio_updater(batched_bio, batched_lat)
                             refined = refined * bioupdater_gate_cache + batched_bio * (1.0 - bioupdater_gate_cache)
                         else:

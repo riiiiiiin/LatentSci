@@ -8,6 +8,7 @@ models/
 
 # 数据集 (Datasets)
 ChemCotDataset/
+ChemCotDataset-old/
 data/
 
 # 训练输出结果 (Training Outputs)
