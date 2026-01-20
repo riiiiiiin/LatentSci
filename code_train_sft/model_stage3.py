@@ -809,9 +809,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             # Special case: BioUpdater enabled but TaskThinker disabled -> do a single memory update once,
             # without task-latent loop / refinement.
             active_indices = [
-                b
-                for b in range(B)
-                if bio_positions_list[b] and int(bio_thinker_visible_lens_list[b]) > 0
+                b for b in range(B) if bio_positions_list[b] and int(bio_thinker_visible_lens_list[b]) > 0
             ]
             if active_indices:
                 llm = self._get_actual_llm()
@@ -829,24 +827,28 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     update_mask[b, :vis_L] = 1
                     anchor_pos_list.append(vis_L - 1)
 
+                embeds_in = model_input_embeds
                 out = backbone(
-                    inputs_embeds=model_input_embeds,
+                    inputs_embeds=embeds_in,
                     attention_mask=update_mask,
                     return_dict=True,
                     use_cache=False,
                 )
                 hidden_states = out.last_hidden_state  # (B, L, d)
 
-                bios = [model_input_embeds[b, bio_positions_list[b]] for b in active_indices]
+                bios = [embeds_in[b, bio_positions_list[b]] for b in active_indices]
                 batched_bio = torch.nn.utils.rnn.pad_sequence(bios, batch_first=True)
                 lats = [hidden_states[b, anchor_pos_list[i]].unsqueeze(0) for i, b in enumerate(active_indices)]
                 batched_lat = torch.stack(lats, dim=0)  # (B_active, 1, d)
 
                 refined = self.bio_updater(batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype))
+
+                embeds_out = embeds_in.clone()
                 for i, b in enumerate(active_indices):
-                    model_input_embeds[b, bio_positions_list[b]] = refined[i, : len(bio_positions_list[b])].to(
-                        dtype=model_input_embeds.dtype
+                    embeds_out[b, bio_positions_list[b]] = refined[i, : len(bio_positions_list[b])].to(
+                        dtype=embeds_out.dtype
                     )
+                model_input_embeds = embeds_out
 
         # 4c. Final forward
         outputs = self.model(
@@ -1272,8 +1274,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             if active_indices:
                 llm = self._get_actual_llm()
                 backbone = llm.model
+
+                embeds_in = prompt_embeds
                 out = backbone(
-                    inputs_embeds=prompt_embeds,
+                    inputs_embeds=embeds_in,
                     attention_mask=prompt_attn_mask,
                     return_dict=True,
                     use_cache=False,
@@ -1286,16 +1290,19 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     diff = int(diffs[b])
                     curr_L = int(fused_samples_list[b].size(1))
                     anchor_pos = diff + curr_L - 1
-                    bios.append(prompt_embeds[b, [idx + diff for idx in bio_positions_list[b]]])
+                    bios.append(embeds_in[b, [idx + diff for idx in bio_positions_list[b]]])
                     lats.append(hidden_states[b, anchor_pos].unsqueeze(0))
 
                 batched_bio = torch.nn.utils.rnn.pad_sequence(bios, batch_first=True)
                 batched_lat = torch.stack(lats, dim=0).to(dtype=self.model.dtype)
                 refined = self.bio_updater(batched_bio.to(self.model.dtype), batched_lat)
+
+                embeds_out = embeds_in.clone()
                 for i, b in enumerate(active_indices):
                     diff = int(diffs[b])
                     positions = [idx + diff for idx in bio_positions_list[b]]
-                    prompt_embeds[b, positions] = refined[i, : len(positions)].to(dtype=prompt_embeds.dtype)
+                    embeds_out[b, positions] = refined[i, : len(positions)].to(dtype=embeds_out.dtype)
+                prompt_embeds = embeds_out
 
         return prompt_embeds, prompt_attn_mask
 
