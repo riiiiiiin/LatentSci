@@ -79,6 +79,7 @@ def _ensure_lora_and_trainables(
     freeze_llm: bool = False,
     freeze_projector: bool = False,
     freeze_bio_updater: bool = False,
+    freeze_bioupdater_gate: bool = False,
     freeze_bio_thinker: bool = False,
     freeze_task_thinker: bool = False,
 ):
@@ -129,9 +130,9 @@ def _ensure_lora_and_trainables(
     if bioupdater_enabled and (not freeze_bio_updater):
         for p in model.bio_updater.parameters():
             p.requires_grad = True
-        if getattr(model, "bio_updater_gate", None) is not None:
-            for p in model.bio_updater_gate.parameters():
-                p.requires_grad = True
+    if bioupdater_enabled and (not freeze_bioupdater_gate) and getattr(model, "bio_updater_gate", None) is not None:
+        for p in model.bio_updater_gate.parameters():
+            p.requires_grad = True
 
     if biothinker_enabled and hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
         for p in model.bio_thinker.parameters():
@@ -232,6 +233,12 @@ def main():
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Freeze the bio_updater module (memory update).",
+    )
+    parser.add_argument(
+        "--freeze_bioupdater_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater gating module (Linear+Sigmoid hard switch).",
     )
     parser.add_argument(
         "--freeze_bio_thinker",
@@ -433,6 +440,7 @@ def main():
         freeze_llm=bool(args.freeze_llm),
         freeze_projector=bool(args.freeze_projector),
         freeze_bio_updater=bool(args.freeze_bio_updater),
+        freeze_bioupdater_gate=bool(args.freeze_bioupdater_gate),
         freeze_bio_thinker=bool(args.freeze_bio_thinker),
         freeze_task_thinker=bool(args.freeze_task_thinker),
     )

@@ -409,6 +409,12 @@ def train_stage3():
         help="Freeze the bio_updater module (memory update).",
     )
     parser.add_argument(
+        "--freeze_bioupdater_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater gating module (Linear+Sigmoid hard switch).",
+    )
+    parser.add_argument(
         "--freeze_bio_thinker",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
@@ -654,7 +660,7 @@ def train_stage3():
             param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
         if getattr(model, "bio_updater_gate", None) is not None:
             for param in model.bio_updater_gate.parameters():
-                param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
+                param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bioupdater_gate))
 
         if hasattr(model, "bio_thinker"):
             biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
