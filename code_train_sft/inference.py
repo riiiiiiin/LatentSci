@@ -292,6 +292,24 @@ def inference_stage3():
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
     )
     parser.add_argument(
+        "--is_biothinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker (bio-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_taskthinker",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater (memory update) when --is_both_latent is false.",
+    )
+    parser.add_argument(
         "--bio_latent_lambda",
         type=float,
         default=0.0,
@@ -340,6 +358,9 @@ def inference_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         max_cot_string_len = 2048
@@ -349,6 +370,9 @@ def inference_stage3():
         stages = [0]
         is_coconut = False
         is_both_latent = False
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         max_cot_string_len = 2048
@@ -357,6 +381,9 @@ def inference_stage3():
     else: # Stage 3
         is_coconut = False
         is_both_latent = bool(args.is_both_latent)
+        is_biothinker = bool(args.is_biothinker)
+        is_taskthinker = bool(args.is_taskthinker)
+        is_bioupdater = bool(args.is_bioupdater)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         max_cot_string_len = int(args.max_cot_string_len)
@@ -383,6 +410,9 @@ def inference_stage3():
             mol_config=mol_config,
             is_coconut=is_coconut,
             is_both_latent=is_both_latent,
+            is_biothinker=is_biothinker,
+            is_taskthinker=is_taskthinker,
+            is_bioupdater=is_bioupdater,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             max_cot_string_len=max_cot_string_len,
