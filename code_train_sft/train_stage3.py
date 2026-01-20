@@ -356,6 +356,9 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
             _require_ckpt_key(checkpoint, "bio_updater", path=mm_projector_path)
             model.bio_updater.load_state_dict(checkpoint["bio_updater"])
             logger.info("Loaded bio_updater weights.")
+            if getattr(model, "bio_updater_gate", None) is not None and "bio_updater_gate" in checkpoint:
+                model.bio_updater_gate.load_state_dict(checkpoint["bio_updater_gate"])
+                logger.info("Loaded bio_updater_gate weights.")
 
         if hasattr(model, "bio_thinker"):
             _require_ckpt_key(checkpoint, "bio_thinker", path=mm_projector_path)
@@ -449,6 +452,12 @@ def train_stage3():
         help="Enable BioUpdater (memory update) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--is_bioupdater_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater gating (Linear+Sigmoid hard switch). When false, behavior is unchanged.",
+    )
+    parser.add_argument(
         "--bio_latent_lambda",
         type=float,
         default=0.0,
@@ -523,6 +532,7 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -540,6 +550,7 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -556,6 +567,7 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         task_latent_lambda = float(args.task_latent_lambda)
@@ -590,6 +602,7 @@ def train_stage3():
             is_biothinker=is_biothinker,
             is_taskthinker=is_taskthinker,
             is_bioupdater=is_bioupdater,
+            is_bioupdater_gating=is_bioupdater_gating,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             task_latent_lambda=task_latent_lambda,
@@ -639,6 +652,9 @@ def train_stage3():
         bioupdater_enabled = bool(is_both_latent) or bool(is_bioupdater)
         for param in model.bio_updater.parameters():
             param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
+        if getattr(model, "bio_updater_gate", None) is not None:
+            for param in model.bio_updater_gate.parameters():
+                param.requires_grad = bioupdater_enabled and (not bool(args.freeze_bio_updater))
 
         if hasattr(model, "bio_thinker"):
             biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
@@ -744,6 +760,8 @@ def train_stage3():
             'bio_thinker': model.bio_thinker.state_dict(),
             'task_thinker': model.task_thinker.state_dict(),
         }
+        if getattr(model, "bio_updater_gate", None) is not None:
+            mm_weights["bio_updater_gate"] = model.bio_updater_gate.state_dict()
         torch.save(mm_weights, current_projector_path)
         
         # 如果不保存全模型，我们也至少存一下分词器，方便后续推理加载

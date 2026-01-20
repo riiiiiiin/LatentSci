@@ -129,6 +129,9 @@ def _ensure_lora_and_trainables(
     if bioupdater_enabled and (not freeze_bio_updater):
         for p in model.bio_updater.parameters():
             p.requires_grad = True
+        if getattr(model, "bio_updater_gate", None) is not None:
+            for p in model.bio_updater_gate.parameters():
+                p.requires_grad = True
 
     if biothinker_enabled and hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
         for p in model.bio_thinker.parameters():
@@ -154,6 +157,8 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         checkpoint = torch.load(mm_projector_path, map_location=device)
         model.projector.load_state_dict(checkpoint["projector"])
         model.bio_updater.load_state_dict(checkpoint.get("bio_updater", {}), strict=False)
+        if getattr(model, "bio_updater_gate", None) is not None:
+            model.bio_updater_gate.load_state_dict(checkpoint.get("bio_updater_gate", {}), strict=False)
         if hasattr(model, "bio_thinker"):
             model.bio_thinker.load_state_dict(checkpoint.get("bio_thinker", {}), strict=False)
         if hasattr(model, "task_thinker"):
@@ -320,6 +325,12 @@ def main():
         help="Enable BioUpdater (memory update) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--is_bioupdater_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater gating (Linear+Sigmoid hard switch). When false, behavior is unchanged.",
+    )
+    parser.add_argument(
         "--bio_thinker_dropout",
         type=float,
         default=0.0,
@@ -406,6 +417,7 @@ def main():
         is_biothinker=bool(args.is_biothinker),
         is_taskthinker=bool(args.is_taskthinker),
         is_bioupdater=bool(args.is_bioupdater),
+        is_bioupdater_gating=bool(args.is_bioupdater_gating),
         is_coconut=False,
         bio_thinker_dropout=float(args.bio_thinker_dropout),
         task_thinker_dropout=float(args.task_thinker_dropout),
@@ -515,6 +527,8 @@ def main():
     model.model.save_pretrained(lora_dir)
     mm_path = os.path.join(final_dir, "mm_projector.pt")
     to_save = {"projector": model.projector.state_dict(), "bio_updater": model.bio_updater.state_dict()}
+    if getattr(model, "bio_updater_gate", None) is not None:
+        to_save["bio_updater_gate"] = model.bio_updater_gate.state_dict()
     if hasattr(model, "bio_thinker"):
         to_save["bio_thinker"] = model.bio_thinker.state_dict()
     if hasattr(model, "task_thinker"):

@@ -194,24 +194,27 @@ class TaskThinker(nn.Module):
 # 2. 多模态融合模型 (兼容trl的SFTTrainer)
 # ============================
 class Qwen3MoleculeLLM(PreTrainedModel):
-    def __init__(self, 
-                 qwen_model_name,
-                 mol_config,       # 🚨 必须传入配置字典
-                 device_map=None,
-                 is_coconut: bool = False,
-                 is_both_latent: bool = False,
-                 is_biothinker: bool = False,
-                 is_taskthinker: bool = False,
-                 is_bioupdater: bool = False,
-                 bio_latent_lambda: float = 0.0,
-                 bio_latent_alpha: float = 0.5,
-                 task_latent_lambda: float = 0.0,
-                 task_latent_alpha: float = 0.5,
-                 bio_thinker_dropout: float = 0.0,
-                 task_thinker_dropout: float = 0.0,
-                 max_cot_string_len: int = 2048,
-                 task_latent_max_steps: int = 10,
-                 torch_dtype=torch.bfloat16):
+    def __init__(
+        self,
+        qwen_model_name,
+        mol_config,  # 🚨 必须传入配置字典
+        device_map=None,
+        is_coconut: bool = False,
+        is_both_latent: bool = False,
+        is_biothinker: bool = False,
+        is_taskthinker: bool = False,
+        is_bioupdater: bool = False,
+        is_bioupdater_gating: bool = False,
+        bio_latent_lambda: float = 0.0,
+        bio_latent_alpha: float = 0.5,
+        task_latent_lambda: float = 0.0,
+        task_latent_alpha: float = 0.5,
+        bio_thinker_dropout: float = 0.0,
+        task_thinker_dropout: float = 0.0,
+        max_cot_string_len: int = 2048,
+        task_latent_max_steps: int = 10,
+        torch_dtype=torch.bfloat16,
+    ):
         """
         分子-文本多模态大语言模型
         
@@ -235,6 +238,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.is_biothinker = bool(is_biothinker)
         self.is_taskthinker = bool(is_taskthinker)
         self.is_bioupdater = bool(is_bioupdater)
+        self.is_bioupdater_gating = bool(is_bioupdater_gating)
         self.bio_latent_lambda = float(bio_latent_lambda)
         self.bio_latent_alpha = float(bio_latent_alpha)
         self.task_latent_lambda = float(task_latent_lambda)
@@ -314,6 +318,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # ---- Stage 3: Bio Token Updater ----
         self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
         self.bio_updater.to(self.model.dtype)
+        self.bio_updater_gate: Optional[nn.Linear] = None
+        if self.is_bioupdater_gating:
+            self.bio_updater_gate = nn.Linear(self.d_llm, 1)
+            self.bio_updater_gate.to(self.model.dtype)
+            nn.init.zeros_(self.bio_updater_gate.weight)
+            nn.init.constant_(self.bio_updater_gate.bias, 1.0)
 
         # ---- Stage 3: Bio Thinker (optional) ----
         self.bio_thinker = BioThinker(
@@ -384,6 +394,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         if hasattr(self.model, "gradient_checkpointing_disable"):
             self.model.gradient_checkpointing_disable()
 
+    def _bioupdater_with_gating(self, bio_embeds: torch.Tensor, latent_states: torch.Tensor) -> torch.Tensor:
+        refined = self.bio_updater(bio_embeds, latent_states)
+        if not self.is_bioupdater_gating:
+            return refined
+        if self.bio_updater_gate is None:
+            raise RuntimeError("is_bioupdater_gating=True but `bio_updater_gate` is not initialized.")
+
+        gate_logits = self.bio_updater_gate(latent_states[:, -1, :])
+        gate_prob = torch.sigmoid(gate_logits)
+        hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
+        gate = hard.detach() - gate_prob.detach() + gate_prob
+        gate = gate.to(dtype=refined.dtype).view(-1, 1, 1)
+        return refined * gate + bio_embeds * (1.0 - gate)
+
     def _apply_latent_feedback(
         self,
         initial_embeds,
@@ -438,7 +462,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     batched_lat = torch.stack(lats)
                     
                     # 4. 批量过 Cross-Attention 更新
-                    refined = self.bio_updater(batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype))
+                    refined = self._bioupdater_with_gating(
+                        batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype)
+                    )
                     
                     # 5. 将更新后的结果写回 (Scatter back)
                     for i, b in enumerate(active_indices):
@@ -841,7 +867,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 lats = [hidden_states[b, anchor_pos_list[i]].unsqueeze(0) for i, b in enumerate(active_indices)]
                 batched_lat = torch.stack(lats, dim=0)  # (B_active, 1, d)
 
-                refined = self.bio_updater(batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype))
+                refined = self._bioupdater_with_gating(
+                    batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype)
+                )
 
                 embeds_out = embeds_in.clone()
                 for i, b in enumerate(active_indices):
@@ -1224,7 +1252,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     if refine_bio_tokens and bio_positions:
                         batched_bio = base_prefix[:, bio_positions].to(dtype=self.model.dtype)
                         batched_lat = torch.cat(latent_state_hist, dim=1).to(dtype=self.model.dtype)
-                        refined = self.bio_updater(batched_bio, batched_lat)
+                        refined = self._bioupdater_with_gating(batched_bio, batched_lat)
                         base_prefix[:, bio_positions] = refined.to(dtype=base_prefix.dtype)
 
                     new_latent = latent_state.to(dtype=self.model.dtype)
@@ -1295,7 +1323,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
                 batched_bio = torch.nn.utils.rnn.pad_sequence(bios, batch_first=True)
                 batched_lat = torch.stack(lats, dim=0).to(dtype=self.model.dtype)
-                refined = self.bio_updater(batched_bio.to(self.model.dtype), batched_lat)
+                refined = self._bioupdater_with_gating(batched_bio.to(self.model.dtype), batched_lat)
 
                 embeds_out = embeds_in.clone()
                 for i, b in enumerate(active_indices):
