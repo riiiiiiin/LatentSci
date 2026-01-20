@@ -435,6 +435,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         #     raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
 
         curr_embeds = initial_embeds
+        bioupdater_gate_cache = None
         for pass_idx in range(max_n_latents):
             # 执行前向传播获取隐藏状态
             outputs = backbone(
@@ -447,6 +448,33 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             
             new_embeds = curr_embeds.clone()
 
+            # If gating is enabled, compute it once at the very beginning (pass 0) from the token *before* the first
+            # latent position (for task-latent blocks, this is the <start_latent> token).
+            if (
+                pass_idx == 0
+                and self.is_bioupdater_gating
+                and refine_bio_tokens
+                and bio_positions is not None
+                and self.bio_updater_gate is not None
+            ):
+                gate_indices = [b for b in range(B) if bio_positions[b] and len(latent_positions[b]) > 0]
+                if gate_indices:
+                    anchor_states = []
+                    for b in gate_indices:
+                        first_pos = int(latent_positions[b][0])
+                        anchor_pos = max(first_pos - 1, 0)
+                        anchor_states.append(hidden_states[b, anchor_pos])
+                    anchor = torch.stack(anchor_states, dim=0).to(dtype=self.model.dtype)  # (B_gate, d)
+
+                    gate_logits = self.bio_updater_gate(anchor)  # (B_gate, 1)
+                    gate_prob = torch.sigmoid(gate_logits)
+                    hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
+                    gate = hard.detach() - gate_prob.detach() + gate_prob
+                    gate = gate.to(dtype=self.model.dtype).view(-1, 1, 1)  # (B_gate, 1, 1)
+
+                    bioupdater_gate_cache = torch.ones(B, 1, 1, device=anchor.device, dtype=self.model.dtype)
+                    bioupdater_gate_cache[torch.tensor(gate_indices, device=anchor.device, dtype=torch.long)] = gate
+
             # --- Evidence Refinement (Memory Write) ---
             if refine_bio_tokens and bio_positions is not None:
                 # 1. 识别当前 Pass 需要更新的 Batch 索引
@@ -456,15 +484,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     # 2. 批量提取并补齐 BIO tokens [B_active, max_N_bio, d_llm]
                     bios = [curr_embeds[b, bio_positions[b]] for b in active_indices]
                     batched_bio = torch.nn.utils.rnn.pad_sequence(bios, batch_first=True)
+                    batched_bio = batched_bio.to(self.model.dtype)
                     
                     # 3. 批量提取 Latent States [B_active, pass_idx + 1, d_llm]
                     lats = [hidden_states[b, latent_positions[b][:pass_idx + 1]] for b in active_indices]
                     batched_lat = torch.stack(lats)
+                    batched_lat = batched_lat.to(self.model.dtype)
                     
                     # 4. 批量过 Cross-Attention 更新
-                    refined = self._bioupdater_with_gating(
-                        batched_bio.to(self.model.dtype), batched_lat.to(self.model.dtype)
-                    )
+                    refined = self.bio_updater(batched_bio, batched_lat)
+                    if bioupdater_gate_cache is not None:
+                        gates = bioupdater_gate_cache.index_select(
+                            0, torch.tensor(active_indices, device=bioupdater_gate_cache.device, dtype=torch.long)
+                        ).to(dtype=refined.dtype)
+                        refined = refined * gates + batched_bio.to(dtype=refined.dtype) * (1.0 - gates)
                     
                     # 5. 将更新后的结果写回 (Scatter back)
                     for i, b in enumerate(active_indices):
@@ -1225,6 +1258,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 latent_block = seq[-1:].unsqueeze(0).clone()  # [1, 1, d] (starts with <start_latent>)
                 latent_state_hist = []
                 bio_positions = bio_positions_list[b]
+                bioupdater_gate_cache = None
 
                 ended = False
                 for _ in range(int(self.task_latent_max_steps)):
@@ -1252,7 +1286,21 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     if refine_bio_tokens and bio_positions:
                         batched_bio = base_prefix[:, bio_positions].to(dtype=self.model.dtype)
                         batched_lat = torch.cat(latent_state_hist, dim=1).to(dtype=self.model.dtype)
-                        refined = self._bioupdater_with_gating(batched_bio, batched_lat)
+                        if self.is_bioupdater_gating:
+                            if bioupdater_gate_cache is None:
+                                if self.bio_updater_gate is None:
+                                    raise RuntimeError(
+                                        "is_bioupdater_gating=True but `bio_updater_gate` is not initialized."
+                                    )
+                                gate_logits = self.bio_updater_gate(batched_lat[:, -1, :])
+                                gate_prob = torch.sigmoid(gate_logits)
+                                hard = (gate_prob > 0.5).to(dtype=gate_prob.dtype)
+                                gate = hard.detach() - gate_prob.detach() + gate_prob
+                                bioupdater_gate_cache = gate.to(dtype=batched_bio.dtype).view(-1, 1, 1)
+                            refined = self.bio_updater(batched_bio, batched_lat)
+                            refined = refined * bioupdater_gate_cache + batched_bio * (1.0 - bioupdater_gate_cache)
+                        else:
+                            refined = self.bio_updater(batched_bio, batched_lat)
                         base_prefix[:, bio_positions] = refined.to(dtype=base_prefix.dtype)
 
                     new_latent = latent_state.to(dtype=self.model.dtype)
