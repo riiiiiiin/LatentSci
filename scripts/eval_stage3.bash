@@ -7,7 +7,10 @@ set -euo pipefail
 EXP_NAME=""
 CKPT_DIR=""
 TEMPERATURE=0.7
-IS_BOTH_LATENT=true
+IS_BOTH_LATENT=false
+IS_BIOTHINKER=false
+IS_TASKTHINKER=false
+IS_BIOUPDATER=false
 TASK_LATENT_MAX_STEPS=10
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +35,18 @@ while [[ $# -gt 0 ]]; do
       TASK_LATENT_MAX_STEPS="$2"
       shift 2
       ;;
+    --is-biothinker)
+      IS_BIOTHINKER="$2"
+      shift 2
+      ;;
+    --is-taskthinker)
+      IS_TASKTHINKER="$2"
+      shift 2
+      ;;
+    --is-bioupdater)
+      IS_BIOUPDATER="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -40,7 +55,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${EXP_NAME}" || -z "${CKPT_DIR}" ]]; then
-  echo "Usage: $0 --exp-name <EXP_NAME> --ckpt-dir <CKPT_DIR> [--temperature <TEMPERATURE>] [--is-both-latent <IS_BOTH_LATENT>]"
+  echo "Usage: $0 --exp-name <EXP_NAME> --ckpt-dir <CKPT_DIR> [...]"
   exit 1
 fi
 
@@ -76,10 +91,45 @@ DATA_PATH="data/${DATASET_NAME}"
 
 PYTHON_BIN="python"
 
+is_true() {
+  local v="${1:-}"
+  v="${v,,}"
+  case "${v}" in
+    1|true|yes|y) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-LOG_NAME="${EXP_NAME}_${TIMESTAMP}_${IS_BOTH_LATENT}_${TEMPERATURE}_${DATASET_NAME}_${TASK_LATENT_MAX_STEPS}"
-LOG_NAME="${LOG_NAME//\//_}"
+
+LOG_PARTS=()
+LOG_PARTS+=("${EXP_NAME}")
+LOG_PARTS+=("${TIMESTAMP}")
+
+if is_true "${IS_BOTH_LATENT}"; then
+  LOG_PARTS+=("IS_BOTH_LATENT")
+fi
+if is_true "${IS_BIOTHINKER}"; then
+  LOG_PARTS+=("IS_BIOTHINKER")
+fi
+if is_true "${IS_TASKTHINKER}"; then
+  LOG_PARTS+=("IS_TASKTHINKER")
+fi
+if is_true "${IS_BIOUPDATER}"; then
+  LOG_PARTS+=("IS_BIOUPDATER")
+fi
+
+LOG_PARTS+=("T${TEMPERATURE}")
+LOG_PARTS+=("${DATASET_NAME}")
+LOG_PARTS+=("TASKMAX${TASK_LATENT_MAX_STEPS}")
+
+IFS='_'
+RAW_LOG_NAME="${LOG_PARTS[*]}"
+unset IFS
+LOG_NAME="${RAW_LOG_NAME//\//_}"
 LOG_NAME="${LOG_NAME//./}"
+LOG_NAME="${LOG_NAME// /_}"
+
 INFERENCE_RESULTS_PATH="${OUTPUT_DIR}/results/inference_results_${TIMESTAMP}.json"
 
 echo "========== Stage-3 Inference Runner =========="
@@ -93,6 +143,10 @@ echo "DATA_PATH:                 ${DATA_PATH}"
 echo "TRAINING_STAGE:            ${TRAINING_STAGE}"
 echo "C_THOUGHT:                 ${C_THOUGHT}"
 echo "IS_BOTH_LATENT:            ${IS_BOTH_LATENT}"
+echo "IS_BIOTHINKER:             ${IS_BIOTHINKER}"
+echo "IS_TASKTHINKER:            ${IS_TASKTHINKER}"
+echo "IS_BIOUPDATER:             ${IS_BIOUPDATER}"
+echo "TASK_LATENT_MAX_STEPS:     ${TASK_LATENT_MAX_STEPS}"
 echo "INFERENCE_RESULTS_PATH:    ${INFERENCE_RESULTS_PATH}"
 echo "LOG_NAME:                  ${LOG_NAME}"
 if [[ -n "${CUDA_DEVICES}" ]]; then
