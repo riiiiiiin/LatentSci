@@ -79,8 +79,11 @@ def _ensure_lora_and_trainables(
     freeze_llm: bool = False,
     freeze_projector: bool = False,
     freeze_bio_updater: bool = False,
+    freeze_bioupdater_gate: bool = False,
     freeze_bio_thinker: bool = False,
+    freeze_biothinker_gate: bool = False,
     freeze_task_thinker: bool = False,
+    freeze_taskthinker_gate: bool = False,
 ):
     """
     Make sure LoRA is enabled on the underlying text model, and that the multimodal heads are trainable.
@@ -129,12 +132,21 @@ def _ensure_lora_and_trainables(
     if bioupdater_enabled and (not freeze_bio_updater):
         for p in model.bio_updater.parameters():
             p.requires_grad = True
+    if bioupdater_enabled and (not freeze_bioupdater_gate) and getattr(model, "bio_updater_gate", None) is not None:
+        for p in model.bio_updater_gate.parameters():
+            p.requires_grad = True
 
     if biothinker_enabled and hasattr(model, "bio_thinker") and (not freeze_bio_thinker):
         for p in model.bio_thinker.parameters():
             p.requires_grad = True
+    if biothinker_enabled and (not freeze_biothinker_gate) and getattr(model, "bio_thinker_gate", None) is not None:
+        for p in model.bio_thinker_gate.parameters():
+            p.requires_grad = True
     if taskthinker_enabled and hasattr(model, "task_thinker") and (not freeze_task_thinker):
         for p in model.task_thinker.parameters():
+            p.requires_grad = True
+    if taskthinker_enabled and (not freeze_taskthinker_gate) and getattr(model, "task_thinker_gate", None) is not None:
+        for p in model.task_thinker_gate.parameters():
             p.requires_grad = True
 
 
@@ -154,10 +166,16 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         checkpoint = torch.load(mm_projector_path, map_location=device)
         model.projector.load_state_dict(checkpoint["projector"])
         model.bio_updater.load_state_dict(checkpoint.get("bio_updater", {}), strict=False)
+        if getattr(model, "bio_updater_gate", None) is not None:
+            model.bio_updater_gate.load_state_dict(checkpoint.get("bio_updater_gate", {}), strict=False)
         if hasattr(model, "bio_thinker"):
             model.bio_thinker.load_state_dict(checkpoint.get("bio_thinker", {}), strict=False)
+        if getattr(model, "bio_thinker_gate", None) is not None:
+            model.bio_thinker_gate.load_state_dict(checkpoint.get("bio_thinker_gate", {}), strict=False)
         if hasattr(model, "task_thinker"):
             model.task_thinker.load_state_dict(checkpoint.get("task_thinker", {}), strict=False)
+        if getattr(model, "task_thinker_gate", None) is not None:
+            model.task_thinker_gate.load_state_dict(checkpoint.get("task_thinker_gate", {}), strict=False)
         logger.info("Loaded projector (+ bio_updater if present).")
 
     return model
@@ -229,16 +247,34 @@ def main():
         help="Freeze the bio_updater module (memory update).",
     )
     parser.add_argument(
+        "--freeze_bioupdater_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the bio_updater gating module (Linear+Sigmoid hard switch).",
+    )
+    parser.add_argument(
         "--freeze_bio_thinker",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Freeze the bio_thinker module.",
     )
     parser.add_argument(
+        "--freeze_biothinker_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the BioThinker gating module (Linear+Sigmoid hard switch).",
+    )
+    parser.add_argument(
         "--freeze_task_thinker",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Freeze the task_thinker module.",
+    )
+    parser.add_argument(
+        "--freeze_taskthinker_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the TaskThinker gating module (Linear+Sigmoid hard switch).",
     )
 
     # Load starting weights (optional)
@@ -318,6 +354,24 @@ def main():
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Enable BioUpdater (memory update) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater gating (Linear+Sigmoid hard switch). When false, behavior is unchanged.",
+    )
+    parser.add_argument(
+        "--is_biothinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker gating (hard switch). When gate=0, bio-latent block is replaced by anchor embedding.",
+    )
+    parser.add_argument(
+        "--is_taskthinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker gating (hard switch). Gate scales the MLP residual: x + gate*y.",
     )
     parser.add_argument(
         "--bio_thinker_dropout",
@@ -406,6 +460,9 @@ def main():
         is_biothinker=bool(args.is_biothinker),
         is_taskthinker=bool(args.is_taskthinker),
         is_bioupdater=bool(args.is_bioupdater),
+        is_bioupdater_gating=bool(args.is_bioupdater_gating),
+        is_biothinker_gating=bool(args.is_biothinker_gating),
+        is_taskthinker_gating=bool(args.is_taskthinker_gating),
         is_coconut=False,
         bio_thinker_dropout=float(args.bio_thinker_dropout),
         task_thinker_dropout=float(args.task_thinker_dropout),
@@ -421,8 +478,11 @@ def main():
         freeze_llm=bool(args.freeze_llm),
         freeze_projector=bool(args.freeze_projector),
         freeze_bio_updater=bool(args.freeze_bio_updater),
+        freeze_bioupdater_gate=bool(args.freeze_bioupdater_gate),
         freeze_bio_thinker=bool(args.freeze_bio_thinker),
+        freeze_biothinker_gate=bool(args.freeze_biothinker_gate),
         freeze_task_thinker=bool(args.freeze_task_thinker),
+        freeze_taskthinker_gate=bool(args.freeze_taskthinker_gate),
     )
 
     # 4) Dataset
@@ -515,10 +575,16 @@ def main():
     model.model.save_pretrained(lora_dir)
     mm_path = os.path.join(final_dir, "mm_projector.pt")
     to_save = {"projector": model.projector.state_dict(), "bio_updater": model.bio_updater.state_dict()}
+    if getattr(model, "bio_updater_gate", None) is not None:
+        to_save["bio_updater_gate"] = model.bio_updater_gate.state_dict()
     if hasattr(model, "bio_thinker"):
         to_save["bio_thinker"] = model.bio_thinker.state_dict()
+    if getattr(model, "bio_thinker_gate", None) is not None:
+        to_save["bio_thinker_gate"] = model.bio_thinker_gate.state_dict()
     if hasattr(model, "task_thinker"):
         to_save["task_thinker"] = model.task_thinker.state_dict()
+    if getattr(model, "task_thinker_gate", None) is not None:
+        to_save["task_thinker_gate"] = model.task_thinker_gate.state_dict()
     torch.save(to_save, mm_path)
     model.tokenizer.save_pretrained(final_dir)
     logger.info(f"Saved LoRA to {lora_dir} and mm weights to {mm_path}")
