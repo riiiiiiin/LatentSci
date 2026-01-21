@@ -137,6 +137,52 @@ class BioTokenUpdater(nn.Module):
         return bio_embeds
 
 
+class BioTokenUpdaterMulti(nn.Module):
+    """
+    Multi-expert variant of BioTokenUpdater: replaces the FFN MLP with 4 FFN "experts" and
+    uses a softmax weighting gate to mix their outputs.
+    """
+
+    def __init__(self, d_llm: int, nhead: int = 8, n_experts: int = 4):
+        super().__init__()
+        self.n_experts = int(n_experts)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=d_llm, num_heads=nhead, batch_first=True)
+        self.norm = nn.LayerNorm(d_llm)
+
+        self.gate = nn.Linear(d_llm, self.n_experts, bias=True)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+
+        hidden_dim = int(d_llm * 2)
+        self.w1 = nn.Parameter(torch.empty(self.n_experts, hidden_dim, d_llm))
+        self.b1 = nn.Parameter(torch.zeros(self.n_experts, hidden_dim))
+        self.w2 = nn.Parameter(torch.empty(self.n_experts, d_llm, hidden_dim))
+        self.b2 = nn.Parameter(torch.zeros(self.n_experts, d_llm))
+
+        for e in range(self.n_experts):
+            nn.init.kaiming_uniform_(self.w1[e], a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.w2[e], a=math.sqrt(5))
+        self.norm_ffn = nn.LayerNorm(d_llm)
+
+    def forward(self, bio_embeds: torch.Tensor, latent_states: torch.Tensor) -> torch.Tensor:
+        """
+        bio_embeds: [B, N_bio, d_llm]
+        latent_states: [B, N_latent, d_llm]
+        """
+        attn_out, _ = self.cross_attn(query=bio_embeds, key=latent_states, value=latent_states)
+        bio_embeds = self.norm(bio_embeds + attn_out)
+
+        weights = F.softmax(self.gate(bio_embeds.float()), dim=-1).to(dtype=bio_embeds.dtype)  # (B, N, E)
+
+        hidden = torch.einsum("bnd,ehd->bneh", bio_embeds, self.w1) + self.b1.unsqueeze(0).unsqueeze(0)
+        hidden = F.relu(hidden)
+
+        out = torch.einsum("bneh,edh,bne->bnd", hidden, self.w2, weights) + torch.einsum("bne,ed->bnd", weights, self.b2)
+
+        bio_embeds = self.norm_ffn(bio_embeds + out)
+        return bio_embeds
+
+
 # ============================
 # 1b2. Hard gating: hard switch with straight-through gradients
 # ============================
@@ -208,6 +254,78 @@ class BioThinker(nn.Module):
         return self.layer(x, src_key_padding_mask=key_padding_mask)
 
 
+class _TransformerEncoderLayerMultiFFN(nn.Module):
+    """
+    A minimal TransformerEncoderLayer (post-norm) with a softmax-weighted 4-expert FFN replacing the standard FFN.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        dropout: float = 0.0,
+        n_experts: int = 4,
+    ):
+        super().__init__()
+        self.n_experts = int(n_experts)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.dropout1 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+
+        self.gate = nn.Linear(d_model, self.n_experts, bias=True)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+
+        self.dropout_ffn = float(dropout)
+        self.w1 = nn.Parameter(torch.empty(self.n_experts, dim_feedforward, d_model))
+        self.b1 = nn.Parameter(torch.zeros(self.n_experts, dim_feedforward))
+        self.w2 = nn.Parameter(torch.empty(self.n_experts, d_model, dim_feedforward))
+        self.b2 = nn.Parameter(torch.zeros(self.n_experts, d_model))
+        for e in range(self.n_experts):
+            nn.init.kaiming_uniform_(self.w1[e], a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.w2[e], a=math.sqrt(5))
+
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, *, src_key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        attn_out, _ = self.self_attn(x, x, x, key_padding_mask=src_key_padding_mask, need_weights=False)
+        x = self.norm1(x + self.dropout1(attn_out))
+
+        weights = F.softmax(self.gate(x.float()), dim=-1).to(dtype=x.dtype)
+        hidden = torch.einsum("bld,ehd->bleh", x, self.w1) + self.b1.unsqueeze(0).unsqueeze(0)
+        hidden = F.gelu(hidden)
+        hidden = F.dropout(hidden, p=self.dropout_ffn, training=self.training)
+
+        out = torch.einsum("bleh,edh,ble->bld", hidden, self.w2, weights) + torch.einsum("ble,ed->bld", weights, self.b2)
+
+        x = self.norm2(x + self.dropout2(out))
+        return x
+
+
+class BioThinkerMulti(nn.Module):
+    """
+    Multi-expert variant of BioThinker: replaces the Transformer FFN with 4 FFN experts mixed by a softmax gate.
+    """
+
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.0, dim_feedforward: Optional[int] = None, n_experts: int = 4):
+        super().__init__()
+        self.pos = SinusoidalPositionalEncoding(d_model=d_model)
+        self.layer = _TransformerEncoderLayerMultiFFN(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=(dim_feedforward if dim_feedforward is not None else d_model * 4),
+            dropout=dropout,
+            n_experts=n_experts,
+        )
+
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = x + self.pos(x)
+        key_padding_mask = (attention_mask == 0) if attention_mask is not None else None
+        return self.layer(x, src_key_padding_mask=key_padding_mask)
+
+
 class TaskThinker(nn.Module):
     def __init__(self, d_model: int, hidden_mult: int = 4, dropout: float = 0.0):
         super().__init__()
@@ -225,6 +343,46 @@ class TaskThinker(nn.Module):
         return self.fc2(self.dropout(self.act(self.fc1(self.norm(x)))))
 
 
+class TaskThinkerMulti(nn.Module):
+    """
+    Multi-expert variant of TaskThinker: replaces the single MLP with 4 MLP "experts" and
+    uses a softmax weighting gate to mix their outputs.
+    """
+
+    def __init__(self, d_model: int, hidden_mult: int = 4, dropout: float = 0.0, n_experts: int = 4):
+        super().__init__()
+        self.n_experts = int(n_experts)
+        self.norm = nn.LayerNorm(d_model)
+        self.gate = nn.Linear(d_model, self.n_experts, bias=True)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+
+        hidden_dim = int(d_model * hidden_mult)
+        self.dropout = float(dropout)
+        self.w1 = nn.Parameter(torch.empty(self.n_experts, hidden_dim, d_model))
+        self.b1 = nn.Parameter(torch.zeros(self.n_experts, hidden_dim))
+        self.w2 = nn.Parameter(torch.empty(self.n_experts, d_model, hidden_dim))
+        self.b2 = nn.Parameter(torch.zeros(self.n_experts, d_model))
+        for e in range(self.n_experts):
+            nn.init.kaiming_uniform_(self.w1[e], a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.w2[e], a=math.sqrt(5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.delta(x)
+        return x + y
+
+    def delta(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = self.norm(x)
+        weights = F.softmax(self.gate(x_norm.float()), dim=-1).to(dtype=x_norm.dtype)
+
+        hidden = torch.einsum("bld,ehd->bleh", x_norm, self.w1) + self.b1.unsqueeze(0).unsqueeze(0)
+        hidden = F.gelu(hidden)
+        hidden = F.dropout(hidden, p=self.dropout, training=self.training)
+
+        out = torch.einsum("bleh,edh,ble->bld", hidden, self.w2, weights) + torch.einsum("ble,ed->bld", weights, self.b2)
+        return out
+
+
 # ============================
 # 2. 多模态融合模型 (兼容trl的SFTTrainer)
 # ============================
@@ -239,6 +397,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         is_biothinker: bool = False,
         is_taskthinker: bool = False,
         is_bioupdater: bool = False,
+        is_biothinker_multi: bool = False,
+        is_taskthinker_multi: bool = False,
+        is_bioupdater_multi: bool = False,
         is_bioupdater_gating: bool = False,
         is_biothinker_gating: bool = False,
         is_taskthinker_gating: bool = False,
@@ -275,6 +436,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.is_biothinker = bool(is_biothinker)
         self.is_taskthinker = bool(is_taskthinker)
         self.is_bioupdater = bool(is_bioupdater)
+        self.is_biothinker_multi = bool(is_biothinker_multi)
+        self.is_taskthinker_multi = bool(is_taskthinker_multi)
+        self.is_bioupdater_multi = bool(is_bioupdater_multi)
         self.is_bioupdater_gating = bool(is_bioupdater_gating)
         self.is_biothinker_gating = bool(is_biothinker_gating)
         self.is_taskthinker_gating = bool(is_taskthinker_gating)
@@ -355,7 +519,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.projector.to(self.model.dtype)
 
         # ---- Stage 3: Bio Token Updater ----
-        self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
+        if self.is_bioupdater_multi:
+            self.bio_updater = BioTokenUpdaterMulti(d_llm=self.d_llm, nhead=self.mol_num_heads)
+        else:
+            self.bio_updater = BioTokenUpdater(d_llm=self.d_llm, nhead=self.mol_num_heads)
         self.bio_updater.to(self.model.dtype)
         self.bio_updater_gate: Optional[HardSigmoidGate] = None
         if self.is_bioupdater_gating:
@@ -363,11 +530,18 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             self.bio_updater_gate.to(self.model.dtype)
 
         # ---- Stage 3: Bio Thinker (optional) ----
-        self.bio_thinker = BioThinker(
-            d_model=self.d_llm,
-            nhead=self.mol_num_heads,
-            dropout=self.bio_thinker_dropout,
-        )
+        if self.is_biothinker_multi:
+            self.bio_thinker = BioThinkerMulti(
+                d_model=self.d_llm,
+                nhead=self.mol_num_heads,
+                dropout=self.bio_thinker_dropout,
+            )
+        else:
+            self.bio_thinker = BioThinker(
+                d_model=self.d_llm,
+                nhead=self.mol_num_heads,
+                dropout=self.bio_thinker_dropout,
+            )
         self.bio_thinker.to(self.model.dtype)
         self.bio_thinker_gate: Optional[HardSigmoidGate] = None
         if self.is_biothinker_gating:
@@ -375,7 +549,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             self.bio_thinker_gate.to(self.model.dtype)
 
         # ---- Stage 3: Task Thinker (optional) ----
-        self.task_thinker = TaskThinker(d_model=self.d_llm, dropout=self.task_thinker_dropout)
+        if self.is_taskthinker_multi:
+            self.task_thinker = TaskThinkerMulti(d_model=self.d_llm, dropout=self.task_thinker_dropout)
+        else:
+            self.task_thinker = TaskThinker(d_model=self.d_llm, dropout=self.task_thinker_dropout)
         self.task_thinker.to(self.model.dtype)
         self.task_thinker_gate: Optional[HardSigmoidGate] = None
         if self.is_taskthinker_gating:

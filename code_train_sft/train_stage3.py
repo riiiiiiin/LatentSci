@@ -464,16 +464,34 @@ def train_stage3():
         help="Enable BioThinker (bio-latent block) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--is_biothinker_multi",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Use BioThinkerMulti (4-expert weighted FFN) instead of BioThinker.",
+    )
+    parser.add_argument(
         "--is_taskthinker",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--is_taskthinker_multi",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Use TaskThinkerMulti (4-expert weighted MLP) instead of TaskThinker.",
+    )
+    parser.add_argument(
         "--is_bioupdater",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Enable BioUpdater (memory update) when --is_both_latent is false.",
+    )
+    parser.add_argument(
+        "--is_bioupdater_multi",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Use BioTokenUpdaterMulti (4-expert weighted FFN) instead of BioTokenUpdater.",
     )
     parser.add_argument(
         "--is_bioupdater_gating",
@@ -568,6 +586,9 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_biothinker_multi = bool(args.is_biothinker_multi)
+        is_taskthinker_multi = bool(args.is_taskthinker_multi)
+        is_bioupdater_multi = bool(args.is_bioupdater_multi)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
         is_biothinker_gating = bool(args.is_biothinker_gating)
         is_taskthinker_gating = bool(args.is_taskthinker_gating)
@@ -588,6 +609,9 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_biothinker_multi = bool(args.is_biothinker_multi)
+        is_taskthinker_multi = bool(args.is_taskthinker_multi)
+        is_bioupdater_multi = bool(args.is_bioupdater_multi)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
         is_biothinker_gating = bool(args.is_biothinker_gating)
         is_taskthinker_gating = bool(args.is_taskthinker_gating)
@@ -607,6 +631,9 @@ def train_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_biothinker_multi = bool(args.is_biothinker_multi)
+        is_taskthinker_multi = bool(args.is_taskthinker_multi)
+        is_bioupdater_multi = bool(args.is_bioupdater_multi)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
         is_biothinker_gating = bool(args.is_biothinker_gating)
         is_taskthinker_gating = bool(args.is_taskthinker_gating)
@@ -644,6 +671,9 @@ def train_stage3():
             is_biothinker=is_biothinker,
             is_taskthinker=is_taskthinker,
             is_bioupdater=is_bioupdater,
+            is_biothinker_multi=is_biothinker_multi,
+            is_taskthinker_multi=is_taskthinker_multi,
+            is_bioupdater_multi=is_bioupdater_multi,
             is_bioupdater_gating=is_bioupdater_gating,
             is_biothinker_gating=is_biothinker_gating,
             is_taskthinker_gating=is_taskthinker_gating,
