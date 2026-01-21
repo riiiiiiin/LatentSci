@@ -364,10 +364,16 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
             _require_ckpt_key(checkpoint, "bio_thinker", path=mm_projector_path)
             model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
             logger.info("Loaded bio_thinker weights.")
+            if getattr(model, "bio_thinker_gate", None) is not None and "bio_thinker_gate" in checkpoint:
+                model.bio_thinker_gate.load_state_dict(checkpoint["bio_thinker_gate"])
+                logger.info("Loaded bio_thinker_gate weights.")
         if hasattr(model, "task_thinker"):
             _require_ckpt_key(checkpoint, "task_thinker", path=mm_projector_path)
             model.task_thinker.load_state_dict(checkpoint["task_thinker"])
             logger.info("Loaded task_thinker weights.")
+            if getattr(model, "task_thinker_gate", None) is not None and "task_thinker_gate" in checkpoint:
+                model.task_thinker_gate.load_state_dict(checkpoint["task_thinker_gate"])
+                logger.info("Loaded task_thinker_gate weights.")
             
     return model
 
@@ -421,10 +427,22 @@ def train_stage3():
         help="Freeze the bio_thinker module.",
     )
     parser.add_argument(
+        "--freeze_biothinker_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the BioThinker gating module (Linear+Sigmoid hard switch).",
+    )
+    parser.add_argument(
         "--freeze_task_thinker",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Freeze the task_thinker module.",
+    )
+    parser.add_argument(
+        "--freeze_taskthinker_gate",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Freeze the TaskThinker gating module (Linear+Sigmoid hard switch).",
     )
     # Stage 3 switches (only effective when --training_stage 3)
     parser.add_argument(
@@ -462,6 +480,18 @@ def train_stage3():
         type=lambda x: (str(x).lower() == "true"),
         default=False,
         help="Enable BioUpdater gating (Linear+Sigmoid hard switch). When false, behavior is unchanged.",
+    )
+    parser.add_argument(
+        "--is_biothinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker gating (hard switch). When gate=0, bio-latent block is replaced by anchor embedding.",
+    )
+    parser.add_argument(
+        "--is_taskthinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker gating (hard switch). Gate scales the MLP residual: x + gate*y.",
     )
     parser.add_argument(
         "--bio_latent_lambda",
@@ -539,6 +569,8 @@ def train_stage3():
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -557,6 +589,8 @@ def train_stage3():
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         task_latent_lambda = 0.0
@@ -574,6 +608,8 @@ def train_stage3():
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
         is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         task_latent_lambda = float(args.task_latent_lambda)
@@ -609,6 +645,8 @@ def train_stage3():
             is_taskthinker=is_taskthinker,
             is_bioupdater=is_bioupdater,
             is_bioupdater_gating=is_bioupdater_gating,
+            is_biothinker_gating=is_biothinker_gating,
+            is_taskthinker_gating=is_taskthinker_gating,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             task_latent_lambda=task_latent_lambda,
@@ -666,10 +704,18 @@ def train_stage3():
             biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
             for param in model.bio_thinker.parameters():
                 param.requires_grad = biothinker_enabled and (not bool(args.freeze_bio_thinker))
+        if getattr(model, "bio_thinker_gate", None) is not None:
+            biothinker_enabled = bool(is_both_latent) or bool(is_biothinker)
+            for param in model.bio_thinker_gate.parameters():
+                param.requires_grad = biothinker_enabled and (not bool(args.freeze_biothinker_gate))
         if hasattr(model, "task_thinker"):
             taskthinker_enabled = bool(is_both_latent) or bool(is_taskthinker)
             for param in model.task_thinker.parameters():
                 param.requires_grad = taskthinker_enabled and (not bool(args.freeze_task_thinker))
+        if getattr(model, "task_thinker_gate", None) is not None:
+            taskthinker_enabled = bool(is_both_latent) or bool(is_taskthinker)
+            for param in model.task_thinker_gate.parameters():
+                param.requires_grad = taskthinker_enabled and (not bool(args.freeze_taskthinker_gate))
         
         model.model.train()
 
@@ -768,6 +814,10 @@ def train_stage3():
         }
         if getattr(model, "bio_updater_gate", None) is not None:
             mm_weights["bio_updater_gate"] = model.bio_updater_gate.state_dict()
+        if getattr(model, "bio_thinker_gate", None) is not None:
+            mm_weights["bio_thinker_gate"] = model.bio_thinker_gate.state_dict()
+        if getattr(model, "task_thinker_gate", None) is not None:
+            mm_weights["task_thinker_gate"] = model.task_thinker_gate.state_dict()
         torch.save(mm_weights, current_projector_path)
         
         # 如果不保存全模型，我们也至少存一下分词器，方便后续推理加载
