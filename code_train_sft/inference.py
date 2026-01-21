@@ -310,6 +310,24 @@ def inference_stage3():
         help="Enable BioUpdater (memory update) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--is_bioupdater_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioUpdater gating (Linear+Sigmoid hard switch). When false, behavior is unchanged.",
+    )
+    parser.add_argument(
+        "--is_biothinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable BioThinker gating (hard switch). When gate=0, bio-latent block is replaced by anchor embedding.",
+    )
+    parser.add_argument(
+        "--is_taskthinker_gating",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Enable TaskThinker gating (hard switch). Gate scales the MLP residual: x + gate*y.",
+    )
+    parser.add_argument(
         "--bio_latent_lambda",
         type=float,
         default=0.0,
@@ -361,6 +379,9 @@ def inference_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         max_cot_string_len = 2048
@@ -373,6 +394,9 @@ def inference_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = 0.0
         bio_latent_alpha = 0.5
         max_cot_string_len = 2048
@@ -384,6 +408,9 @@ def inference_stage3():
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
         is_bioupdater = bool(args.is_bioupdater)
+        is_bioupdater_gating = bool(args.is_bioupdater_gating)
+        is_biothinker_gating = bool(args.is_biothinker_gating)
+        is_taskthinker_gating = bool(args.is_taskthinker_gating)
         bio_latent_lambda = float(args.bio_latent_lambda)
         bio_latent_alpha = float(args.bio_latent_alpha)
         max_cot_string_len = int(args.max_cot_string_len)
@@ -413,6 +440,9 @@ def inference_stage3():
             is_biothinker=is_biothinker,
             is_taskthinker=is_taskthinker,
             is_bioupdater=is_bioupdater,
+            is_bioupdater_gating=is_bioupdater_gating,
+            is_biothinker_gating=is_biothinker_gating,
+            is_taskthinker_gating=is_taskthinker_gating,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             max_cot_string_len=max_cot_string_len,
@@ -439,12 +469,22 @@ def inference_stage3():
         
         for param in model.bio_updater.parameters():
             param.requires_grad = False
+        if getattr(model, "bio_updater_gate", None) is not None:
+            for param in model.bio_updater_gate.parameters():
+                param.requires_grad = False
 
         if hasattr(model, "bio_thinker"):
             for param in model.bio_thinker.parameters():
                 param.requires_grad = False
+        if getattr(model, "bio_thinker_gate", None) is not None:
+            for param in model.bio_thinker_gate.parameters():
+                param.requires_grad = False
+                
         if hasattr(model, "task_thinker"):
             for param in model.task_thinker.parameters():
+                param.requires_grad = False
+        if getattr(model, "task_thinker_gate", None) is not None:
+            for param in model.task_thinker_gate.parameters():
                 param.requires_grad = False
         
         model.model.eval()

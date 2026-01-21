@@ -11,6 +11,9 @@ IS_BOTH_LATENT=false
 IS_BIOTHINKER=false
 IS_TASKTHINKER=false
 IS_BIOUPDATER=false
+IS_BIOTHINKER_GATING=false
+IS_TASKTHINKER_GATING=false
+IS_BIOUPDATER_GATING=false
 TASK_LATENT_MAX_STEPS=10
 
 while [[ $# -gt 0 ]]; do
@@ -19,7 +22,15 @@ while [[ $# -gt 0 ]]; do
       EXP_NAME="$2"
       shift 2
       ;;
+    --exp_name)
+      EXP_NAME="$2"
+      shift 2
+      ;;
     --ckpt-dir)
+      CKPT_DIR="$2"
+      shift 2
+      ;;
+    --ckpt_dir)
       CKPT_DIR="$2"
       shift 2
       ;;
@@ -31,7 +42,15 @@ while [[ $# -gt 0 ]]; do
       IS_BOTH_LATENT="$2"
       shift 2
       ;;
+    --is_both_latent)
+      IS_BOTH_LATENT="$2"
+      shift 2
+      ;;
     --task-latent-max-steps)
+      TASK_LATENT_MAX_STEPS="$2"
+      shift 2
+      ;;
+    --task_latent_max_steps)
       TASK_LATENT_MAX_STEPS="$2"
       shift 2
       ;;
@@ -39,12 +58,48 @@ while [[ $# -gt 0 ]]; do
       IS_BIOTHINKER="$2"
       shift 2
       ;;
+    --is_biothinker)
+      IS_BIOTHINKER="$2"
+      shift 2
+      ;;
     --is-taskthinker)
+      IS_TASKTHINKER="$2"
+      shift 2
+      ;;
+    --is_taskthinker)
       IS_TASKTHINKER="$2"
       shift 2
       ;;
     --is-bioupdater)
       IS_BIOUPDATER="$2"
+      shift 2
+      ;;
+    --is_bioupdater)
+      IS_BIOUPDATER="$2"
+      shift 2
+      ;;
+    --is-biothinker-gating)
+      IS_BIOTHINKER_GATING="$2"
+      shift 2
+      ;;
+    --is_biothinker_gating)
+      IS_BIOTHINKER_GATING="$2"
+      shift 2
+      ;;
+    --is-taskthinker-gating)
+      IS_TASKTHINKER_GATING="$2"
+      shift 2
+      ;;
+    --is_taskthinker_gating)
+      IS_TASKTHINKER_GATING="$2"
+      shift 2
+      ;;
+    --is-bioupdater-gating)
+      IS_BIOUPDATER_GATING="$2"
+      shift 2
+      ;;
+    --is_bioupdater_gating)
+      IS_BIOUPDATER_GATING="$2"
       shift 2
       ;;
     *)
@@ -107,16 +162,25 @@ LOG_PARTS+=("${EXP_NAME}")
 LOG_PARTS+=("${TIMESTAMP}")
 
 if is_true "${IS_BOTH_LATENT}"; then
-  LOG_PARTS+=("IS_BOTH_LATENT")
+  LOG_PARTS+=("BOTH_LATENT")
 fi
 if is_true "${IS_BIOTHINKER}"; then
-  LOG_PARTS+=("IS_BIOTHINKER")
+  LOG_PARTS+=("BIOTHINKER")
 fi
 if is_true "${IS_TASKTHINKER}"; then
-  LOG_PARTS+=("IS_TASKTHINKER")
+  LOG_PARTS+=("TASKTHINKER")
 fi
 if is_true "${IS_BIOUPDATER}"; then
-  LOG_PARTS+=("IS_BIOUPDATER")
+  LOG_PARTS+=("BIOUPDATER")
+fi
+if is_true "${IS_BIOTHINKER_GATING}"; then
+  LOG_PARTS+=("BIOTHINKER_GATING")
+fi
+if is_true "${IS_TASKTHINKER_GATING}"; then
+  LOG_PARTS+=("TASKTHINKER_GATING")
+fi
+if is_true "${IS_BIOUPDATER_GATING}"; then
+  LOG_PARTS+=("BIOUPDATER_GATING")
 fi
 
 LOG_PARTS+=("T${TEMPERATURE}")
@@ -146,6 +210,9 @@ echo "IS_BOTH_LATENT:            ${IS_BOTH_LATENT}"
 echo "IS_BIOTHINKER:             ${IS_BIOTHINKER}"
 echo "IS_TASKTHINKER:            ${IS_TASKTHINKER}"
 echo "IS_BIOUPDATER:             ${IS_BIOUPDATER}"
+echo "IS_BIOTHINKER_GATING:      ${IS_BIOTHINKER_GATING}"
+echo "IS_TASKTHINKER_GATING:     ${IS_TASKTHINKER_GATING}"
+echo "IS_BIOUPDATER_GATING:      ${IS_BIOUPDATER_GATING}"
 echo "TASK_LATENT_MAX_STEPS:     ${TASK_LATENT_MAX_STEPS}"
 echo "INFERENCE_RESULTS_PATH:    ${INFERENCE_RESULTS_PATH}"
 echo "LOG_NAME:                  ${LOG_NAME}"
@@ -219,6 +286,9 @@ for idx in "${!GPU_ARRAY[@]}"; do
     --is_biothinker "${IS_BIOTHINKER}"
     --is_taskthinker "${IS_TASKTHINKER}"
     --is_bioupdater "${IS_BIOUPDATER}"
+    --is_biothinker_gating "${IS_BIOTHINKER_GATING}"
+    --is_taskthinker_gating "${IS_TASKTHINKER_GATING}"
+    --is_bioupdater_gating "${IS_BIOUPDATER_GATING}"
     --bio_latent_lambda "${BIO_LATENT_LAMBDA}"
     --bio_latent_alpha "${BIO_LATENT_ALPHA}"
     --max_cot_string_len "${MAX_COT_STRING_LEN}"
