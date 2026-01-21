@@ -883,10 +883,11 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     bio_thinker_mask[b, :vis_L] = 1
 
             thinker_out = self.bio_thinker(final_embeds, attention_mask=bio_thinker_mask)
+            final_embeds_updated = final_embeds.clone()
             for b in range(B):
                 positions = bio_latent_positions_list[b]
                 if positions:
-                    final_embeds[b, positions] = thinker_out[b, positions].to(dtype=final_embeds.dtype)
+                    final_embeds_updated[b, positions] = thinker_out[b, positions].to(dtype=final_embeds_updated.dtype)
             if self.is_biothinker_gating and self.bio_thinker_gate is not None:
                 active_indices = [b for b in range(B) if bio_latent_block_spans_list[b] is not None]
                 if active_indices:
@@ -894,11 +895,11 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     for b in active_indices:
                         anchor_pos = bio_latent_anchor_pos_list[b]
                         if anchor_pos is None:
-                            anchors.append(final_embeds[b, 0])
+                            anchors.append(final_embeds_updated[b, 0])
                         else:
-                            anchors.append(final_embeds[b, int(anchor_pos)])
+                            anchors.append(final_embeds_updated[b, int(anchor_pos)])
                     anchor_states = torch.stack(anchors, dim=0)  # (B_active, d)
-                    gates = self.bio_thinker_gate(anchor_states, out_dtype=final_embeds.dtype)  # (B_active, 1, 1)
+                    gates = self.bio_thinker_gate(anchor_states, out_dtype=final_embeds_updated.dtype)  # (B_active, 1, 1)
                     for i, b in enumerate(active_indices):
                         span = bio_latent_block_spans_list[b]
                         if span is None:
@@ -907,8 +908,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         if end <= start:
                             continue
                         g = gates[i, 0, 0]
-                        anchor = anchor_states[i].to(dtype=final_embeds.dtype)
-                        final_embeds[b, start:end] = final_embeds[b, start:end] * g + anchor.unsqueeze(0) * (1.0 - g)
+                        anchor = anchor_states[i].to(dtype=final_embeds_updated.dtype)
+                        bio_block = final_embeds_updated[b, start:end].clone()
+                        final_embeds_updated[b, start:end] = bio_block * g + anchor.unsqueeze(0) * (1.0 - g)
+            final_embeds = final_embeds_updated
 
         # =========================================================
         # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
@@ -1291,11 +1294,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         bio_thinker_mask[b, start_latent_pos] = 0
 
             thinker_out = self.bio_thinker(prompt_embeds, attention_mask=bio_thinker_mask)
+            prompt_embeds_updated = prompt_embeds.clone()
             for b in range(B):
                 positions = bio_latent_positions_list[b]
                 if positions:
                     shifted = [p + diffs[b] for p in positions]
-                    prompt_embeds[b, shifted] = thinker_out[b, shifted].to(dtype=prompt_embeds.dtype)
+                    prompt_embeds_updated[b, shifted] = thinker_out[b, shifted].to(dtype=prompt_embeds_updated.dtype)
             if self.is_biothinker_gating and self.bio_thinker_gate is not None:
                 active_indices = [b for b in range(B) if bio_latent_block_spans_list[b] is not None]
                 if active_indices:
@@ -1311,20 +1315,20 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         start_s = diff + int(start)
                         end_s = diff + int(end)
                         anchor_s = diff + int(anchor_pos)
-                        anchor_states.append(prompt_embeds[b, anchor_s])
+                        anchor_states.append(prompt_embeds_updated[b, anchor_s])
                         spans_shifted.append((b, start_s, end_s))
 
                     if anchor_states:
                         anchor_states_t = torch.stack(anchor_states, dim=0)
-                        gates = self.bio_thinker_gate(anchor_states_t, out_dtype=prompt_embeds.dtype)
+                        gates = self.bio_thinker_gate(anchor_states_t, out_dtype=prompt_embeds_updated.dtype)
                         for i, (b, start_s, end_s) in enumerate(spans_shifted):
                             if end_s <= start_s:
                                 continue
                             g = gates[i, 0, 0]
-                            anchor = anchor_states_t[i].to(dtype=prompt_embeds.dtype)
-                            prompt_embeds[b, start_s:end_s] = prompt_embeds[b, start_s:end_s] * g + anchor.unsqueeze(0) * (
-                                1.0 - g
-                            )
+                            anchor = anchor_states_t[i].to(dtype=prompt_embeds_updated.dtype)
+                            bio_block = prompt_embeds_updated[b, start_s:end_s].clone()
+                            prompt_embeds_updated[b, start_s:end_s] = bio_block * g + anchor.unsqueeze(0) * (1.0 - g)
+            prompt_embeds = prompt_embeds_updated
 
         # =========================================================
         # 4. Coconut latent-feedback refinement (optional based on presence of <latent>)
