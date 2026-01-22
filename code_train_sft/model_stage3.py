@@ -1069,14 +1069,21 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 active_indices = [b for b in range(B) if bio_latent_block_spans_list[b] is not None]
                 if active_indices:
                     anchors = []
+                    gate_inputs = []
                     for b in active_indices:
                         anchor_pos = bio_latent_anchor_pos_list[b]
                         if anchor_pos is None:
                             anchors.append(final_embeds_updated[b, 0])
+                            gate_inputs.append(thinker_out[b, 0])
                         else:
-                            anchors.append(final_embeds_updated[b, int(anchor_pos)])
+                            anchor_idx = int(anchor_pos)
+                            anchors.append(final_embeds_updated[b, anchor_idx])
+                            gate_inputs.append(thinker_out[b, anchor_idx])
                     anchor_states = torch.stack(anchors, dim=0)  # (B_active, d)
-                    gates = self.bio_thinker_gate(anchor_states, out_dtype=final_embeds_updated.dtype)  # (B_active, 1, 1)
+                    gate_inputs_t = torch.stack(gate_inputs, dim=0)  # (B_active, d)
+                    gates = self.bio_thinker_gate(
+                        gate_inputs_t, out_dtype=final_embeds_updated.dtype
+                    )  # (B_active, 1, 1)
                     for i, b in enumerate(active_indices):
                         span = bio_latent_block_spans_list[b]
                         if span is None:
@@ -1481,6 +1488,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 active_indices = [b for b in range(B) if bio_latent_block_spans_list[b] is not None]
                 if active_indices:
                     anchor_states = []
+                    gate_inputs = []
                     spans_shifted = []
                     for b in active_indices:
                         span = bio_latent_block_spans_list[b]
@@ -1493,11 +1501,13 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                         end_s = diff + int(end)
                         anchor_s = diff + int(anchor_pos)
                         anchor_states.append(prompt_embeds_updated[b, anchor_s])
+                        gate_inputs.append(thinker_out[b, anchor_s])
                         spans_shifted.append((b, start_s, end_s))
 
                     if anchor_states:
                         anchor_states_t = torch.stack(anchor_states, dim=0)
-                        gates = self.bio_thinker_gate(anchor_states_t, out_dtype=prompt_embeds_updated.dtype)
+                        gate_inputs_t = torch.stack(gate_inputs, dim=0)
+                        gates = self.bio_thinker_gate(gate_inputs_t, out_dtype=prompt_embeds_updated.dtype)
                         for i, (b, start_s, end_s) in enumerate(spans_shifted):
                             if end_s <= start_s:
                                 continue
