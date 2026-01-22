@@ -11,6 +11,9 @@ IS_BOTH_LATENT=false
 IS_BIOTHINKER=false
 IS_TASKTHINKER=false
 IS_BIOUPDATER=false
+IS_BIOTHINKER_MULTI=false
+IS_TASKTHINKER_MULTI=false
+IS_BIOUPDATER_MULTI=false
 IS_BIOTHINKER_GATING=false
 IS_TASKTHINKER_GATING=false
 IS_BIOUPDATER_GATING=false
@@ -76,6 +79,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --is_bioupdater)
       IS_BIOUPDATER="$2"
+      shift 2
+      ;;
+    --is-biothinker-multi)
+      IS_BIOTHINKER_MULTI="$2"
+      shift 2
+      ;;
+    --is_biothinker_multi)
+      IS_BIOTHINKER_MULTI="$2"
+      shift 2
+      ;;
+    --is-taskthinker-multi)
+      IS_TASKTHINKER_MULTI="$2"
+      shift 2
+      ;;
+    --is_taskthinker_multi)
+      IS_TASKTHINKER_MULTI="$2"
+      shift 2
+      ;;
+    --is-bioupdater-multi)
+      IS_BIOUPDATER_MULTI="$2"
+      shift 2
+      ;;
+    --is_bioupdater_multi)
+      IS_BIOUPDATER_MULTI="$2"
       shift 2
       ;;
     --is-biothinker-gating)
@@ -173,6 +200,15 @@ fi
 if is_true "${IS_BIOUPDATER}"; then
   LOG_PARTS+=("BIOUPDATER")
 fi
+if is_true "${IS_BIOTHINKER_MULTI}"; then
+  LOG_PARTS+=("BIOTHINKER_MULTI")
+fi
+if is_true "${IS_TASKTHINKER_MULTI}"; then
+  LOG_PARTS+=("TASKTHINKER_MULTI")
+fi
+if is_true "${IS_BIOUPDATER_MULTI}"; then
+  LOG_PARTS+=("BIOUPDATER_MULTI")
+fi
 if is_true "${IS_BIOTHINKER_GATING}"; then
   LOG_PARTS+=("BIOTHINKER_GATING")
 fi
@@ -210,6 +246,9 @@ echo "IS_BOTH_LATENT:            ${IS_BOTH_LATENT}"
 echo "IS_BIOTHINKER:             ${IS_BIOTHINKER}"
 echo "IS_TASKTHINKER:            ${IS_TASKTHINKER}"
 echo "IS_BIOUPDATER:             ${IS_BIOUPDATER}"
+echo "IS_BIOTHINKER_MULTI:       ${IS_BIOTHINKER_MULTI}"
+echo "IS_TASKTHINKER_MULTI:      ${IS_TASKTHINKER_MULTI}"
+echo "IS_BIOUPDATER_MULTI:       ${IS_BIOUPDATER_MULTI}"
 echo "IS_BIOTHINKER_GATING:      ${IS_BIOTHINKER_GATING}"
 echo "IS_TASKTHINKER_GATING:     ${IS_TASKTHINKER_GATING}"
 echo "IS_BIOUPDATER_GATING:      ${IS_BIOUPDATER_GATING}"
@@ -286,6 +325,9 @@ for idx in "${!GPU_ARRAY[@]}"; do
     --is_biothinker "${IS_BIOTHINKER}"
     --is_taskthinker "${IS_TASKTHINKER}"
     --is_bioupdater "${IS_BIOUPDATER}"
+    --is_biothinker_multi "${IS_BIOTHINKER_MULTI}"
+    --is_taskthinker_multi "${IS_TASKTHINKER_MULTI}"
+    --is_bioupdater_multi "${IS_BIOUPDATER_MULTI}"
     --is_biothinker_gating "${IS_BIOTHINKER_GATING}"
     --is_taskthinker_gating "${IS_TASKTHINKER_GATING}"
     --is_bioupdater_gating "${IS_BIOUPDATER_GATING}"
