@@ -346,6 +346,30 @@ def inference_stage3():
         help="Enable TaskThinker gating (hard switch). Gate scales the MLP residual: x + gate*y.",
     )
     parser.add_argument(
+        "--mask_task_latent_steps",
+        type=int,
+        default=0,
+        help="Mask task-latent steps during inference)."
+    )
+    parser.add_argument(
+        "--mask_task_latent_noise_std",
+        type=float,
+        default=1.0,
+        help="Noise std for task-latent masking during inference (only effective when --mask_task_latent_steps > 0)."
+    )
+    parser.add_argument(
+        "--shuffle_task_latents",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Shuffle task-latent order during inference."
+    )
+    parser.add_argument(
+        "--mask_task_latent_implementation",
+        type=str,
+        default="mask",
+        help="Implementation of task-latent masking during inference: 'mask', 'zero' or 'noise' (only effective when --mask_task_latent_steps > 0)."
+    )
+    parser.add_argument(
         "--bio_latent_lambda",
         type=float,
         default=0.0,
@@ -389,6 +413,11 @@ def inference_stage3():
     # 当前的权重路径，初始为参数传入的路径
     current_lora_path = args.lora_path
     current_projector_path = args.projector_path
+    
+    mask_task_latent_steps = int(args.mask_task_latent_steps)
+    mask_task_latent_noise_std = float(args.mask_task_latent_noise_std)
+    shuffle_task_latents = bool(args.shuffle_task_latents) if mask_task_latent_steps == 0 else False
+    mask_task_latent_implementation = str(args.mask_task_latent_implementation)
     
     if args.training_stage == 1:
         stages = [0]
@@ -473,6 +502,10 @@ def inference_stage3():
             is_bioupdater_gating=is_bioupdater_gating,
             is_biothinker_gating=is_biothinker_gating,
             is_taskthinker_gating=is_taskthinker_gating,
+            mask_task_latent_steps=mask_task_latent_steps,
+            mask_task_latent_noise_std=mask_task_latent_noise_std,
+            shuffle_task_latents=shuffle_task_latents,
+            mask_task_latent_implementation=mask_task_latent_implementation,
             bio_latent_lambda=bio_latent_lambda,
             bio_latent_alpha=bio_latent_alpha,
             max_cot_string_len=max_cot_string_len,

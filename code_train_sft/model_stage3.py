@@ -403,6 +403,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         is_bioupdater_gating: bool = False,
         is_biothinker_gating: bool = False,
         is_taskthinker_gating: bool = False,
+        mask_task_latent_steps: int = 0,
+        mask_task_latent_noise_std: float = 1.0,
+        shuffle_task_latents: bool = False,
+        mask_task_latent_implementation: str = "mask",
         bio_latent_lambda: float = 0.0,
         bio_latent_alpha: float = 0.5,
         task_latent_lambda: float = 0.0,
@@ -442,6 +446,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.is_bioupdater_gating = bool(is_bioupdater_gating)
         self.is_biothinker_gating = bool(is_biothinker_gating)
         self.is_taskthinker_gating = bool(is_taskthinker_gating)
+        self.mask_task_latent_steps = int(mask_task_latent_steps)
+        self.mask_task_latent_noise_std = float(mask_task_latent_noise_std)
+        self.shuffle_task_latents = bool(shuffle_task_latents)
+        self.mask_task_latent_implementation = str(mask_task_latent_implementation)
         self.bio_latent_lambda = float(bio_latent_lambda)
         self.bio_latent_alpha = float(bio_latent_alpha)
         self.task_latent_lambda = float(task_latent_lambda)
@@ -1555,6 +1563,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             lm_head = llm.lm_head
 
             new_samples = []
+            latent_mask_starts = []
+            latent_mask_ends = []
             task_latent_counts = []
             for b in range(B):
                 diff = diffs[b]
@@ -1621,6 +1631,40 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 n_task_latents = max(int(latent_block.size(1)) - 2, 0)
                 task_latent_counts.append(n_task_latents)
 
+                if self.mask_task_latent_steps > 0 and latent_block.size(1) > 2:
+                    mask_steps = min(self.mask_task_latent_steps, latent_block.size(1) - 2)
+                    # print(mask_steps, self.mask_task_latent_steps, latent_block.size(1) - 2)
+                    latent_block = latent_block.clone()
+                    if self.mask_task_latent_implementation == 'noise':
+                        ids = input_ids[b].to(dtype=torch.int64)
+                        seed_val = int(((ids + 1) * 1315423911).sum().item()) & 0xFFFFFFFFFFFFFFFF
+                        gen = torch.Generator(device=latent_block.device)
+                        gen.manual_seed(seed_val)
+                        noise = torch.randn(
+                            latent_block[:, 1:1 + mask_steps, :].shape,
+                            generator=gen,
+                            device=latent_block.device,
+                            dtype=torch.float32,
+                        ) * float(self.mask_task_latent_noise_std)
+                        latent_block[:, 1:1 + mask_steps, :] = noise.to(dtype=latent_block.dtype)
+                    elif self.mask_task_latent_implementation == 'zero':
+                        latent_block[:, 1:1 + mask_steps, :] = torch.zeros_like(latent_block[:, 1:1 + mask_steps, :])
+                    elif self.mask_task_latent_implementation == 'mask':
+                        # print(base_prefix.size(1))
+                        latent_mask_starts.append(base_prefix.size(1) + 1)
+                        latent_mask_ends.append(base_prefix.size(1) + 1 + mask_steps)
+                    else:
+                        raise NotImplementedError(
+                            f"mask_task_latent_implementation={self.mask_task_latent_implementation} is not implemented. If you don't want to mask task latents, set `mask_task_latent_steps=0`.")
+                        
+                if self.shuffle_task_latents and latent_block.size(1) > 2:
+                    latent_block = latent_block.clone()
+                    ids = input_ids[b].to(dtype=torch.int64)
+                    seed_val = int(((ids + 1) * 1315423911).sum().item()) & 0xFFFFFFFFFFFFFFFF
+                    gen = torch.Generator(device=latent_block.device)
+                    gen.manual_seed(seed_val)
+                    latent_block[:, 1:-1, :] = latent_block[:, torch.randperm(latent_block.size(1) - 2, generator=gen) + 1, :]
+                
                 if corrupt_flags[b] and latent_block.size(1) > 2:
                     latent_block = latent_block.clone()
                     if float(corrupt_task_latent_noise_std) > 0.0:
@@ -1648,6 +1692,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 diff = max_L - curr_L
                 new_prompt_embeds[b, diff:] = new_samples[b]
                 new_prompt_attn_mask[b, diff:] = 1
+                # print(curr_L)
+                if latent_mask_starts and latent_mask_ends:
+                    mask_start = latent_mask_starts[b] + diff
+                    mask_end = latent_mask_ends[b] + diff
+                    new_prompt_attn_mask[b, mask_start:mask_end] = 0
+                    # print(mask_start, mask_end)
 
             prompt_embeds, prompt_attn_mask = new_prompt_embeds, new_prompt_attn_mask
             self._last_task_latent_counts = task_latent_counts
