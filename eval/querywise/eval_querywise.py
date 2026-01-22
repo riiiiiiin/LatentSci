@@ -63,10 +63,9 @@ if __name__ == '__main__':
     root_dir = Path(args.root_dir)
     
     banned_tasks = [
-        'drd',
-        'gsk',
-        'jnk',
-        'nepp'
+        'nepp',
+        'equivalence',
+        'retro'
     ]
     
     all_task_names = []
