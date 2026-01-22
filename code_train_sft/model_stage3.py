@@ -1661,9 +1661,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     latent_block = latent_block.clone()
                     ids = input_ids[b].to(dtype=torch.int64)
                     seed_val = int(((ids + 1) * 1315423911).sum().item()) & 0xFFFFFFFFFFFFFFFF
-                    gen = torch.Generator(device=latent_block.device)
+                    gen = torch.Generator(device='cpu')
                     gen.manual_seed(seed_val)
-                    latent_block[:, 1:-1, :] = latent_block[:, torch.randperm(latent_block.size(1) - 2, generator=gen) + 1, :]
+                    perm = torch.randperm(latent_block.size(1) - 2, generator=gen).to(latent_block.device) + 1
+                    latent_block[:, 1:-1, :] = latent_block[:, perm, :]
                 
                 if corrupt_flags[b] and latent_block.size(1) > 2:
                     latent_block = latent_block.clone()
