@@ -382,6 +382,13 @@ def main():
         help="Enable TaskThinker (task-latent block) when --is_both_latent is false.",
     )
     parser.add_argument(
+        "--taskthinker_type",
+        type=str,
+        default="mlp",
+        choices=["mlp", "identity"],
+        help="TaskThinker refinement type: 'mlp' (default) or 'identity' (no MLP / no gate, but keep the loop).",
+    )
+    parser.add_argument(
         "--is_taskthinker_multi",
         type=lambda x: (str(x).lower() == "true"),
         default=False,
@@ -504,6 +511,7 @@ def main():
         is_biothinker=bool(args.is_biothinker),
         is_taskthinker=bool(args.is_taskthinker),
         is_bioupdater=bool(args.is_bioupdater),
+        taskthinker_type=str(args.taskthinker_type),
         is_biothinker_multi=bool(args.is_biothinker_multi),
         is_taskthinker_multi=bool(args.is_taskthinker_multi),
         is_bioupdater_multi=bool(args.is_bioupdater_multi),
