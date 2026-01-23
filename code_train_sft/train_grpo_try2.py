@@ -36,6 +36,26 @@ from trainer_try2.reward_func import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _find_latest_checkpoint(run_dir: str) -> str | None:
+    if not run_dir or (not os.path.isdir(run_dir)):
+        return None
+    best_step = None
+    best_path = None
+    for name in os.listdir(run_dir):
+        if not name.startswith("checkpoint-"):
+            continue
+        step_str = name[len("checkpoint-") :]
+        if not step_str.isdigit():
+            continue
+        path = os.path.join(run_dir, name)
+        if not os.path.isdir(path):
+            continue
+        step = int(step_str)
+        if best_step is None or step > best_step:
+            best_step = step
+            best_path = path
+    return best_path
+
 
 class TerminalRewardPlotCallback(TrainerCallback):
     def __init__(self, reward_key: str = "reward"):
@@ -314,6 +334,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Resume from a checkpoint dir, or set to 'latest' to auto-pick the newest checkpoint under output_dir/run_name.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_prompt_length", type=int, default=2048)
     parser.add_argument("--max_completion_length", type=int, default=256)
@@ -587,7 +613,20 @@ def main():
         corrupt_latent_noise_std=corrupt_latent_noise_std,
     )
 
-    trainer.train()
+    resume = args.resume_from_checkpoint
+    if resume:
+        resume_s = str(resume).strip()
+        if resume_s.lower() == "latest":
+            ckpt = _find_latest_checkpoint(grpo_args.output_dir)
+            if ckpt is None:
+                raise ValueError(f"--resume_from_checkpoint latest: no checkpoint-* directory found under {grpo_args.output_dir}")
+            resume_s = ckpt
+        if not os.path.isdir(resume_s):
+            raise ValueError(f"--resume_from_checkpoint path does not exist or is not a directory: {resume_s}")
+        logger.info("Resuming training from checkpoint: %s", resume_s)
+        trainer.train(resume_from_checkpoint=resume_s)
+    else:
+        trainer.train()
 
     # Save final LoRA + multimodal heads (compatible with stage checkpoints)
     final_dir = grpo_args.output_dir
