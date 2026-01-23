@@ -366,7 +366,7 @@ def inference_stage3():
     parser.add_argument(
         "--mask_task_latent_implementation",
         type=str,
-        default="mask",
+        default="noise",
         help="Implementation of task-latent masking during inference: 'mask', 'zero' or 'noise' (only effective when --mask_task_latent_steps > 0)."
     )
     parser.add_argument(

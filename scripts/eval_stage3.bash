@@ -129,6 +129,38 @@ while [[ $# -gt 0 ]]; do
       IS_BIOUPDATER_GATING="$2"
       shift 2
       ;;
+    --mask-task-latent-steps)
+      MASK_TASK_LATENT_SETPS="$2"
+      shift 2
+      ;;
+    --mask_task_latent_steps)
+      MASK_TASK_LATENT_SETPS="$2"
+      shift 2
+      ;;
+    --mask-task-latent-noise-std)
+      MASK_TASK_LATENT_NOISE_STD="$2"
+      shift 2
+      ;;
+    --mask_task_latent_noise_std)
+      MASK_TASK_LATENT_NOISE_STD="$2"
+      shift 2
+      ;;
+    --shuffle-task-latents)
+      SHUFFLE_TASK_LATENTS="$2"
+      shift 2
+      ;;
+    --shuffle_task_latents)
+      SHUFFLE_TASK_LATENTS="$2"
+      shift 2
+      ;;
+    --mask-task-latent-implementation)
+      MASK_TASK_LATENT_IMPLEMENTATION="$2"
+      shift 2
+      ;;
+    --mask_task_latent_implementation)
+      MASK_TASK_LATENT_IMPLEMENTATION="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -182,11 +214,19 @@ is_true() {
   esac
 }
 
+is_positive() {
+  local v="${1:-}"
+  if [[ "${v}" =~ ^[1-9][0-9]*$ ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 LOG_PARTS=()
 LOG_PARTS+=("${EXP_NAME}")
-LOG_PARTS+=("${TIMESTAMP}")
 
 if is_true "${IS_BOTH_LATENT}"; then
   LOG_PARTS+=("BOTH_LATENT")
@@ -218,10 +258,18 @@ fi
 if is_true "${IS_BIOUPDATER_GATING}"; then
   LOG_PARTS+=("BIOUPDATER_GATING")
 fi
+if is_positive "${MASK_TASK_LATENT_SETPS}"; then
+  LOG_PARTS+=("MASK${MASK_TASK_LATENT_SETPS}")
+  LOG_PARTS+="${MASK_TASK_LATENT_IMPLEMENTATION}"
+fi
+if is_true "${SHUFFLE_TASK_LATENTS}"; then
+  LOG_PARTS+=("SHUFFLE_TASK_LATENTS")
+fi
 
 LOG_PARTS+=("T${TEMPERATURE}")
 LOG_PARTS+=("${DATASET_NAME}")
 LOG_PARTS+=("TASKMAX${TASK_LATENT_MAX_STEPS}")
+LOG_PARTS+=("${TIMESTAMP}")
 
 IFS='_'
 RAW_LOG_NAME="${LOG_PARTS[*]}"
@@ -253,6 +301,10 @@ echo "IS_BIOTHINKER_GATING:      ${IS_BIOTHINKER_GATING}"
 echo "IS_TASKTHINKER_GATING:     ${IS_TASKTHINKER_GATING}"
 echo "IS_BIOUPDATER_GATING:      ${IS_BIOUPDATER_GATING}"
 echo "TASK_LATENT_MAX_STEPS:     ${TASK_LATENT_MAX_STEPS}"
+echo "MASK_TASK_LATENT_SETPS:    ${MASK_TASK_LATENT_SETPS}"
+echo "MASK_TASK_LATENT_IMPLEMENTATION: ${MASK_TASK_LATENT_IMPLEMENTATION}"
+echo "SHUFFLE_TASK_LATENTS:      ${SHUFFLE_TASK_LATENTS}"
+echo "MASK_TASK_LATENT_NOISE_STD: ${MASK_TASK_LATENT_NOISE_STD}"
 echo "INFERENCE_RESULTS_PATH:    ${INFERENCE_RESULTS_PATH}"
 echo "LOG_NAME:                  ${LOG_NAME}"
 if [[ -n "${CUDA_DEVICES}" ]]; then
@@ -331,6 +383,10 @@ for idx in "${!GPU_ARRAY[@]}"; do
     --is_biothinker_gating "${IS_BIOTHINKER_GATING}"
     --is_taskthinker_gating "${IS_TASKTHINKER_GATING}"
     --is_bioupdater_gating "${IS_BIOUPDATER_GATING}"
+    --mask_task_latent_steps "${MASK_TASK_LATENT_SETPS}"
+    --mask_task_latent_implementation "${MASK_TASK_LATENT_IMPLEMENTATION}"
+    --shuffle_task_latents "${SHUFFLE_TASK_LATENTS}"
+    --mask_task_latent_noise_std "${MASK_TASK_LATENT_NOISE_STD}"
     --bio_latent_lambda "${BIO_LATENT_LAMBDA}"
     --bio_latent_alpha "${BIO_LATENT_ALPHA}"
     --max_cot_string_len "${MAX_COT_STRING_LEN}"
