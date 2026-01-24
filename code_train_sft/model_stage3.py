@@ -397,6 +397,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         is_biothinker: bool = False,
         is_taskthinker: bool = False,
         is_bioupdater: bool = False,
+        taskthinker_type: str = "mlp",
         is_biothinker_multi: bool = False,
         is_taskthinker_multi: bool = False,
         is_bioupdater_multi: bool = False,
@@ -440,6 +441,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.is_biothinker = bool(is_biothinker)
         self.is_taskthinker = bool(is_taskthinker)
         self.is_bioupdater = bool(is_bioupdater)
+        taskthinker_type_norm = str(taskthinker_type).strip().lower()
+        if taskthinker_type_norm not in {"mlp", "identity"}:
+            raise ValueError(f"Invalid taskthinker_type: {taskthinker_type!r}. Expected 'mlp' or 'identity'.")
+        self.taskthinker_type = taskthinker_type_norm
         self.is_biothinker_multi = bool(is_biothinker_multi)
         self.is_taskthinker_multi = bool(is_taskthinker_multi)
         self.is_bioupdater_multi = bool(is_bioupdater_multi)
@@ -635,6 +640,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         return refined * gate + bio_embeds * (1.0 - gate)
 
     def _taskthinker_with_gating(self, x: torch.Tensor) -> torch.Tensor:
+        if self.taskthinker_type == "identity":
+            return x
         if not self.is_taskthinker_gating:
             return self.task_thinker(x)
         if self.task_thinker_gate is None:
