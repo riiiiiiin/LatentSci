@@ -12,6 +12,7 @@ IS_BIOTHINKER=false
 IS_TASKTHINKER=false
 IS_BIOUPDATER=false
 IS_BIOTHINKER_MULTI=false
+TASKTHINKER_TYPE="mlp"
 IS_TASKTHINKER_MULTI=false
 IS_BIOUPDATER_MULTI=false
 IS_BIOTHINKER_GATING=false
@@ -165,6 +166,14 @@ while [[ $# -gt 0 ]]; do
       MASK_TASK_LATENT_IMPLEMENTATION="$2"
       shift 2
       ;;
+    --taskthinker-type)
+      TASKTHINKER_TYPE="$2"
+      shift 2
+      ;;
+    --taskthinker_type)
+      TASKTHINKER_TYPE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -269,6 +278,9 @@ fi
 if is_true "${SHUFFLE_TASK_LATENTS}"; then
   LOG_PARTS+=("SHUFFLE_TASK_LATENTS")
 fi
+if [ "$TASKTHINKER_TYPE" = "identity" ]; then
+  LOG_PARTS+=("IDENTITY")
+fi
 
 LOG_PARTS+=("T${TEMPERATURE}")
 LOG_PARTS+=("${DATASET_NAME}")
@@ -299,6 +311,7 @@ echo "IS_BIOTHINKER:             ${IS_BIOTHINKER}"
 echo "IS_TASKTHINKER:            ${IS_TASKTHINKER}"
 echo "IS_BIOUPDATER:             ${IS_BIOUPDATER}"
 echo "IS_BIOTHINKER_MULTI:       ${IS_BIOTHINKER_MULTI}"
+echo "TASKTHINKER_TYPE:          ${TASKTHINKER_TYPE}"
 echo "IS_TASKTHINKER_MULTI:      ${IS_TASKTHINKER_MULTI}"
 echo "IS_BIOUPDATER_MULTI:       ${IS_BIOUPDATER_MULTI}"
 echo "IS_BIOTHINKER_GATING:      ${IS_BIOTHINKER_GATING}"
@@ -382,6 +395,7 @@ for idx in "${!GPU_ARRAY[@]}"; do
     --is_taskthinker "${IS_TASKTHINKER}"
     --is_bioupdater "${IS_BIOUPDATER}"
     --is_biothinker_multi "${IS_BIOTHINKER_MULTI}"
+    --taskthinker_type "${TASKTHINKER_TYPE}"
     --is_taskthinker_multi "${IS_TASKTHINKER_MULTI}"
     --is_bioupdater_multi "${IS_BIOUPDATER_MULTI}"
     --is_biothinker_gating "${IS_BIOTHINKER_GATING}"
