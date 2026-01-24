@@ -279,12 +279,12 @@ def inference_stage3():
     parser.add_argument("--num_return_sequences", type=int, default=1, help="生成重复次数（用于inference模式）")
     parser.add_argument("--include_tasks", type=str, nargs="*", default=None, help="需要包含的任务类型，None表示全部任务（用于inference模式）")
     # Stage 3 switches (only effective when --training_stage 3)
-    # parser.add_argument(
-    #     "--is_coconut",
-    #     type=lambda x: (str(x).lower() == "true"),
-    #     default=True,
-    #     help="Whether to run Coconut latent training for stage 3 (ignored for stage 1/2).",
-    # )
+    parser.add_argument(
+        "--is_coconut",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Whether to run Coconut latent training for stage 3 (ignored for stage 1/2).",
+    )
     parser.add_argument(
         "--is_both_latent",
         type=lambda x: (str(x).lower() == "true"),
@@ -456,7 +456,7 @@ def inference_stage3():
         task_latent_max_steps = 10
         mode_name = "Stage2-WithCOT"
     else: # Stage 3
-        is_coconut = False
+        is_coconut = bool(args.is_coconut)
         is_both_latent = bool(args.is_both_latent)
         is_biothinker = bool(args.is_biothinker)
         is_taskthinker = bool(args.is_taskthinker)
