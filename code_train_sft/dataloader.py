@@ -388,6 +388,7 @@ def load_data(
     include_tasks=None,
     exclude_tasks=['rcr'],
     eval_mode: bool = False,
+    pure_text: bool = False
 ):
     """
     完整的数据加载流程，新增参数 eval_mode：
@@ -412,6 +413,16 @@ def load_data(
     ]
     ds = ds.filter(lambda x: x["id"] not in bad_ids)
 
+    if pure_text:
+        def map_subtask(sample):
+            sample['task'] = sample['subtask']
+            return sample
+        dataset = ds.map(
+            map_subtask,
+            batched=False,
+        )
+        return dataset
+    
     # Step 1: 提取结构化字段（支持 eval 模式）
     dataset = ds.map(
         extract_fields,

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # TODO: extract this logic into model_stage3.py
 from train_stage3 import load_trained_components_stage3
 
-def load_test_data(test_data_path, include_tasks, max_len=None):
+def load_test_data(test_data_path, include_tasks, max_len=None, pure_text=False):
     """
     load test data dispatcher
     exclude subtasks per-bench here
@@ -47,13 +47,14 @@ def load_test_data(test_data_path, include_tasks, max_len=None):
     logger.info(f"Loading test/eval data from: {test_data_path} (eval_mode=True)")
 
     if "ChemCoTBench" in test_data_path:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr', 'mechsel'], max_len=max_len)
+        # add, delete, sub should be tested in moledit, where include_tasks is set explicitly and exclude_tasks is ignored
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['add', 'delete', 'sub', 'rcr', 'mechsel'], max_len=max_len, pure_text=pure_text)
         logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
     elif "ChemCoTDataset" in test_data_path:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr'], max_len=max_len)
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr'], max_len=max_len, pure_text=pure_text)
         logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
     else:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=[], max_len=max_len)
+        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=[], max_len=max_len, pure_text=pure_text)
         logger.info(f"Loaded tokenized eval dataset from dir: {len(dataset)} examples")
     
     return dataset
@@ -65,12 +66,13 @@ def prepare_evaluation_dataset(
     include_tasks = None,
     proc_index: int = 0,
     num_procs: int = 1,
+    pure_text: bool = False
     ):
     """
     
     """
     logger.info(f"Preparing evaluation metadata from {test_data_path}")
-    dataset = load_test_data(test_data_path, include_tasks, max_len=tokenization_max_len)
+    dataset = load_test_data(test_data_path, include_tasks, max_len=tokenization_max_len, pure_text=pure_text)
     original_total = len(dataset)
 
     if max_samples is not None and max_samples < len(dataset):
