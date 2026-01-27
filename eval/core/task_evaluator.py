@@ -5,11 +5,13 @@ import statistics
 from abc import ABC, abstractmethod
 from typing import List, Any, Dict, Optional
 import pandas as pd
+import regex as re
 
 from core.utils import extract_answer
 
 logger = logging.getLogger(__name__)
 
+answer_pattern = re.compile(r'<answer\s*>(.*?)</answer\s*>', flags=re.S)
 
 class BaseTaskEvaluator(ABC):
     def __init__(self, logger: logging.Logger = None):
@@ -48,7 +50,17 @@ class BaseTaskEvaluator(ABC):
             raise ValueError(f"gt file not found: {path}")
         with open(path, 'r') as f:
             return json.load(f)
-
+    
+    
+    def _cot_length(self, result:str) -> int:
+        matches = list(answer_pattern.finditer(result))
+        if matches:
+            cut_pos = matches[-1].start()
+            trimmed_result = result[:cut_pos]
+            return len(trimmed_result)
+        else:
+            return len(result)
+    
     def evaluate_score(
         self,
         model_name: str,
@@ -181,6 +193,7 @@ class BaseTaskEvaluator(ABC):
                 single = self.record_single_result(pred, gt, metadata, task_name) or {}
                 if isinstance(sample['result'], str):
                     single['output_length'] = len(sample['result'])
+                    single['cot_length'] = self._cot_length(sample['result'])
                 
                 # 维护 metric 名顺序
                 for k in single.keys():
@@ -221,6 +234,7 @@ class BaseTaskEvaluator(ABC):
                     single = self.record_single_result(pred, gt, metadata, task_name) or {}
                     if isinstance(results[j], str):
                         single['output_length'] = len(results[j])
+                        single['cot_length'] = self._cot_length(results[j])
                     
                     for k in single.keys():
                         if k not in metric_name_order:
