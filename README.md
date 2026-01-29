@@ -1,6 +1,7 @@
 # LatentChem
 
 🛠️ Environment Installation
+
 1️⃣ Clone the repository
 
 git clone https://github.com/xinwuye/LatentChem.git
@@ -63,7 +64,7 @@ cd code_train_sft
 python xiufu.py
 ```
 
-🧠 Model Download (under dir BioLatentCOT)
+🧠 Model Download (under dir LatentChem)
 
 Download pretrained model from Hugging Face
 
@@ -148,11 +149,10 @@ accelerate launch --multi_gpu --num_processes 8 train_grpo_try2.py \
   --freeze_bio_updater true --freeze_task_thinker true
   ```
 
-
+## Testing
 
 
 ## License
 This code is released under the MIT license (see [LICENSE](LICENSE)).
 
 
-## Testing
