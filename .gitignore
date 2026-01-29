@@ -8,6 +8,7 @@ models/
 
 # 数据集 (Datasets)
 ChemCotDataset/
+ChemCotDataset-old/
 data/
 
 # 训练输出结果 (Training Outputs)
@@ -42,3 +43,12 @@ Thumbs.db
 # 忽略任何目录下以 output 开头的文件夹
 **/output*/
 
+# 忽略任何目录下以 debug 开头的文件夹
+**/debug*/
+
+code_train_sft/oracle/
+
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda1-bio_latent_alpha01
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda1-bio_latent_alpha03
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda05-bio_latent_alpha01
+code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda05-bio_latent_alpha03
