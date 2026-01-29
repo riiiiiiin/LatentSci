@@ -183,7 +183,7 @@ bash scripts/eval_stage3.bash \
     --exp_name <your_exp_name> \
     --ckpt-dir <your_ckpt_dir>
 ```
-Script arguments should be passed as they were during training, for example, provided checkpoint should be started like this:
+Script arguments should be passed as they were during training, for example, pipeline for the provided checkpoint should be started like this:
 ```
 bash scripts/eval_stage3.bash \
     --exp_name <your_exp_name> \
