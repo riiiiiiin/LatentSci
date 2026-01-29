@@ -284,7 +284,8 @@ class MolSimiliarityTaskEvaluator(BaseTaskEvaluator):
         self.evaluator = MoleculeSMILESEvaluator()
     def extract_gt(self, gt_raw_item: Dict[str, Any], task_name: str) -> Any:
         meta = gt_raw_item['meta']
-        meta = json.loads(meta)
+        if isinstance(meta, str):
+            meta = json.loads(meta)
         return meta['reference']
     
     def evaluate_predictions(self, preds: List[List[str]], gts: List[Any], total_len: int, metadata: Optional[List[List[Dict[str, Any]]]] = None, task_name = None) -> Dict[str, float]:
