@@ -1,6 +1,6 @@
 # LatentChem
 
-🛠️ Environment Installation
+🛠️ Environment Configuration
 
 1️⃣ Clone the repository
 
@@ -9,7 +9,7 @@ git clone https://github.com/xinwuye/LatentChem.git
 cd LatentChem
 
 
-2️⃣ Create conda environment (recommended)
+2️⃣ Create conda environment
 
 ```
 conda env create -f env.yml
@@ -31,32 +31,9 @@ pip install transformers==4.57.3 accelerate==1.10.1
 
 1️⃣ Download dataset
 
-The `OpenMol/ChemCoTDataset` is a gated dataset on Hugging Face, which requires you to accept the access conditions before downloading.
 
-Follow these steps:
 
-1. Open the dataset page in your browser:  
-   https://huggingface.co/datasets/OpenMol/ChemCoTDataset
-
-2. Make sure you are logged in to your Hugging Face account (top-right corner).
-
-3. You will see a prompt:  
-   *"You need to agree to share your contact information to access this dataset."*  
-   There will be a checkbox and an **Agree** or **Access repository** button.
-
-4. Check the box and click the button to submit (approval is automatic; no need to wait for manual review).
-
-5. After agreeing, the page will refresh and the full file list will become visible, meaning you now have access.
-
-6. Return to your terminal and run the download command (keep the mirror and acceleration settings for faster download in China):
-
-   ```bash
-   export HF_ENDPOINT=https://hf-mirror.com   # Use HF mirror (if not already set) if you need it in China
-
-   huggingface-cli download --resume-download OpenMol/ChemCoTDataset --repo-type dataset --local-dir ./ChemCotDataset
-   ```                                    
-
-2️⃣Dataset repair,To fill in missing fields in the dataset, use single quotes (''). And we will not use the data in rxn for the time being.
+2️⃣Data clearning
 
 ```
 cd code_train_sft 
@@ -64,7 +41,7 @@ cd code_train_sft
 python xiufu.py
 ```
 
-🧠 Model Download (under dir LatentChem)
+🧠 Base Model Download (under dir LatentChem)
 
 Download pretrained model from Hugging Face
 
@@ -72,7 +49,7 @@ Download pretrained model from Hugging Face
 huggingface-cli download --resume-download Qwen/Qwen3-8B-Base --local-dir ./models/Qwen3-8B-Base
 ```
 
-Download small molecule foundation model from Hugging Face
+Download SMI-TED from Hugging Face
 
 ```
 huggingface-cli download --resume-download ibm-research/materials.smi-ted --local-dir ./models/smi-ted
