@@ -46,6 +46,14 @@ Thumbs.db
 # 忽略任何目录下以 debug 开头的文件夹
 **/debug*/
 
+# SMI-TED model file
+materials/
+
+# Any Results
+**/logs/
+**/results/
+**/records/
+**/eval/figs/
 code_train_sft/oracle/
 
 code_train_sft/stage5-lr2e-4-cf_margin01-bio_latent_ambda1-bio_latent_alpha01

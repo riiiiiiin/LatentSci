@@ -27,7 +27,9 @@ class ModelConfig:
     
     # 数据集路径
     DEFAULT_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot"))
+    TEST_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench"))
     
     # 训练输出目录
     DEFAULT_OUTPUT_DIR = os.path.join(CURRENT_DIR, "qwen3_mol_sft_lora_results")
+    TEST_DATA_PATH = os.path.join(CURRENT_DIR, "qwen3_mol_sft_lora_test_results")
 
