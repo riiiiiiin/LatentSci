@@ -51,7 +51,8 @@ def extract_fields(example, is_eval: bool = False):
     """
     
     # meta 字段是一个 JSON 字符串，需要先解析
-    meta_dict = json.loads(example["meta"])
+    if isinstance(example["meta"], str):
+        meta_dict = json.loads(example["meta"])
     task = example['subtask']
 
     # 2. 解析 struct_cot
@@ -112,6 +113,14 @@ def extract_fields(example, is_eval: bool = False):
         if isinstance(products, str):
             products = [products]
         raw_val = reactants + reagents + products
+        
+    candidate_rank = meta_dict.get("candidate_rank")
+    if candidate_rank:
+        if isinstance(candidate_rank, str):
+            candidate_rank = json.loads(candidate_rank)
+        
+        print(candidate_rank)
+        raw_val.extend(candidate_rank)
 
     if isinstance(raw_val, str):
         val_list = [raw_val]
@@ -411,7 +420,8 @@ def load_data(
         "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
         "9cb0a77d-6203-4686-9c8b-45fd3fc770f2"
     ]
-    ds = ds.filter(lambda x: x["id"] not in bad_ids)
+    if "id" in ds.column_names:
+        ds = ds.filter(lambda x: x["id"] not in bad_ids)
 
     if pure_text:
         def map_subtask(sample):
@@ -489,7 +499,8 @@ def load_grpo_data(path):
         "bedfe3e8-ab07-4b8e-b872-ae281e5f55af",
         "9cb0a77d-6203-4686-9c8b-45fd3fc770f2",
     ]
-    ds = ds.filter(lambda x: x["id"] not in bad_ids)
+    if "id" in ds.column_names:
+        ds = ds.filter(lambda x: x["id"] not in bad_ids)
 
     dataset = ds.map(
         extract_fields,
