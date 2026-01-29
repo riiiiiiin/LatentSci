@@ -12,25 +12,35 @@ def is_desc(task_name, metric_name):
     return desc
 
 # ChemCoTBench
-# metric_of_interest = ['correct_rate',
-#                       'mean', 'success_rate',
-#                       'score',
-#                       'exact_match', 'fts']
+metric_of_interest_1 = ['correct_rate',
+                      'mean', 'success_rate',
+                      'score',
+                      'exact_match', 'fts']
 
 # InstructMol
-metric_of_interest = ['exact_match',
+metric_of_interest_2 = ['exact_match',
                       'bleu', 'levenshtein',
                       'rdk_sims', 'maccs_sims', 'morgan_sims',
                       'validity',
-                      'bleu-2', 'bleu-4', 'meteor',
-                      'rouge-1', 'rouge-2', 'rouge-L']
+                    #   'bleu-2', 'bleu-4', 
+                      'meteor',
+                    #   'rouge-1', 'rouge-2', 'rouge-L'
+                      ]
 
-def eval_single_pair(task_name, dir, model_A, model_B):
+# Meteor only
+# metric_of_interest = ['meteor']
+
+def eval_single_pair(task_name, dir, model_A, model_B, mode):
     try:
         df_A = pd.read_csv(os.path.join(dir, 'eval_results_' + model_A + '.csv'))
         df_B = pd.read_csv(os.path.join(dir, 'eval_results_' + model_B + '.csv'))
     except:
         return 0, 0
+    
+    if mode == 'ChemCoTBench':
+        metric_of_interest = metric_of_interest_1
+    elif mode == 'InstructMol':
+        metric_of_interest = metric_of_interest_2
 
     win_count = 0
     tie_count = 0
@@ -50,12 +60,13 @@ def eval_single_pair(task_name, dir, model_A, model_B):
     if non_tie_count == 0:
         print(task_name, 'No non-tie cases')
         return 0, 0
-    print(task_name ,win_count * 1.0 / non_tie_count, loss_count * 1.0 / non_tie_count)
+    print(task_name ,win_count * 1.0 / non_tie_count, loss_count * 1.0 / non_tie_count, win_count, loss_count)
     return win_count, loss_count
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root_dir', type=str, required=True)
+    parser.add_argument('--mode', type=str, required=True)
     parser.add_argument('--model_A', type=str, required=True)
     parser.add_argument('--model_B', type=str, required=True)
     args = parser.parse_args()
@@ -65,7 +76,8 @@ if __name__ == '__main__':
     banned_tasks = [
         'nepp',
         'equivalence',
-        'retro'
+        'retro',
+        'description-guided molecule design'
     ]
     
     all_task_names = []
@@ -83,9 +95,9 @@ if __name__ == '__main__':
     for task, dir in zip(all_task_names, all_task_dirs):
         if task in banned_tasks:
             continue
-        win_count, loss_count = eval_single_pair(task, dir, args.model_A, args.model_B)
+        win_count, loss_count = eval_single_pair(task, dir, args.model_A, args.model_B, args.mode)
         
         total_win_count += win_count
         total_loss_count += loss_count
         
-    print(total_win_count, total_loss_count)
+    # print(total_win_count, total_loss_count)
