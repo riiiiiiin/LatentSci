@@ -18,4 +18,3 @@ def record_all_ChemCoTBench(log_name, dataset_path, logs_dir, results_dir, num_s
         record_molopt_results(log_name, f'{dataset_path}/mol_opt', logs_dir, results_dir, num_samples)
         record_molund_results(log_name, f'{dataset_path}/mol_und', logs_dir, results_dir, num_samples)
         record_rxn_score(log_name, f'{dataset_path}/rxn', logs_dir, results_dir, num_samples)
-    # record_moledit_results(log_name, f'{dataset_path}/mol_edit', logs_dir, results_dir, num_samples)

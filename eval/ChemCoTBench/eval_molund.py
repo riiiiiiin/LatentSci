@@ -51,8 +51,7 @@ tasks = [
     "fg_count",
     'ring_count',
     'Murcko_scaffold',
-    'ring_system_scaffold',
-    'equivalence'
+    'ring_system_scaffold'
 ]
 
 from core.task_evaluator import BaseTaskEvaluator

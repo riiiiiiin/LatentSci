@@ -40,9 +40,11 @@ def evaluate_molopt_score(model_name, gt_path, logs_dir, results_dir, sample_cou
     
     for task in prop_dict.keys():
         logger.info(f'evaluating {task} for model {model_name}')
-        
-        result_dict[task] = evaluator.evaluate_score(model_name, sample_count, gt_path, logs_dir, task)
-    
+        try:
+            result_dict[task] = evaluator.evaluate_score(model_name, sample_count, gt_path, logs_dir, task)
+        except Exception as e:
+            logger.error(f"Error occurred while evaluating {task} for model {model_name}: {e}")
+            result_dict[task] = None
     
     logger.info(f"eval_score_{model_name}_molopt:\n\r{result_dict}")
     os.makedirs(f"{results_dir}/molopt", exist_ok=True)
