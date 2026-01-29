@@ -39,7 +39,7 @@ def record_mol_similarity_score(model_name, gt_path, logs_dir, results_dir, task
     dataframe.to_csv(f"{results_dir}/InstructMol/{task_name}/eval_results_{model_name}.csv", index=False)
 
 def eval_all_InstructMol(log_name, dataset_path, logs_dir, results_dir, num_samples = 1):
-    tasks = ['molecular description generation', 'forward reaction prediction', 'description-guided molecule design', 'reagent prediction', 'retrosynthesis']
+    tasks = ['molecular description generation', 'forward reaction prediction', 'reagent prediction', 'retrosynthesis']
     
     for task in tasks:
         if task == 'molecular description generation':
@@ -48,7 +48,7 @@ def eval_all_InstructMol(log_name, dataset_path, logs_dir, results_dir, num_samp
             evaluate_mol_similarity_score(log_name, f"{dataset_path}/{task}", logs_dir, results_dir, task, num_samples)
             
 def record_all_InstructMol(log_name, dataset_path, logs_dir, results_dir, num_samples = 1):
-    tasks = ['molecular description generation', 'forward reaction prediction', 'description-guided molecule design', 'reagent prediction', 'retrosynthesis']
+    tasks = ['molecular description generation', 'forward reaction prediction', 'reagent prediction', 'retrosynthesis']
 
     for task in tasks:
         if task == 'molecular description generation':
