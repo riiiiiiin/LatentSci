@@ -31,7 +31,17 @@ pip install transformers==4.57.3 accelerate==1.10.1
 
 1️⃣ Download dataset
 
+···
+huggingface-cli download --repo-type dataset anonymousssss22321/latentchem ChemCotDataset.tar.gz --local-dir .
+···
 
+Run the following commands to extract the files into the required directory structure:
+
+···
+mkdir -p ChemCotDataset# Extract the content# This results in the structure: ChemCotDataset/chemcotbench-cot/
+
+tar -xzvf ChemCotDataset.tar.gz -C ChemCotDataset
+···
 
 2️⃣Data clearning
 
