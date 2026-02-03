@@ -38,7 +38,9 @@ huggingface-cli download --repo-type dataset anonymousssss22321/latentchem ChemC
 Run the following commands to extract the files into the required directory structure:
 
 ```
-mkdir -p ChemCotDataset# Extract the content# This results in the structure: ChemCotDataset/chemcotbench-cot/
+mkdir -p ChemCotDataset
+# Extract the content
+# This results in the structure: ChemCotDataset/chemcotbench-cot/
 
 tar -xzvf ChemCotDataset.tar.gz -C ChemCotDataset
 ```
