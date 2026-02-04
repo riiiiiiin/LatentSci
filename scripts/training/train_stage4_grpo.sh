@@ -2,6 +2,7 @@
 
 # Stage 4: GRPO Training
 echo "Starting Training Stage 4 (GRPO)..."
+cd code_train_sft 
 accelerate launch --multi_gpu --num_processes 8 train_grpo_try2.py \
   --run_name stage4 \
   --lora_path ./outputs/stage3/stage3/lora_weights \
@@ -31,3 +32,4 @@ accelerate launch --multi_gpu --num_processes 8 train_grpo_try2.py \
   --gradient_checkpointing \
   --freeze_bio_updater true --freeze_task_thinker true
 
+cd ..
