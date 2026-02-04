@@ -1,6 +1,12 @@
-# LatentChem: Latent Chain-of-Thought for Biomedical and Chemical Reasoning
+<div align="center">
 
-LatentChem is a research framework designed to enhance the reasoning capabilities of Large Language Models (LLMs) in the chemical and biomedical domains using Latent Chain-of-Thought (CoT) techniques.
+<h1>LatentChem</h1>
+
+<h3>From Textual CoT to Latent Thinking in Chemical Reasoning</h3>
+
+</div>
+
+This is the official repository for our paper "LatentChem: From Textual CoT to Latent Thinking in Chemical Reasoning." Through our study, we found that continuous latent thinking is a superior substrate for chemical reasoning over explicit CoT, overcoming the modality mismatch between language and chemical logic.
 
 ---
 
@@ -62,22 +68,22 @@ bash scripts/data/prepare_test_data.sh
 
 The training process is divided into four stages. We provide scripts for each stage in the `scripts/training/` directory.
 
-### Stage 1: Initial Training
+### Stage 1: Establishing the molecular-linguistic mapping
 ```bash
 bash scripts/training/train_stage1.sh
 ```
 
-### Stage 2: LoRA & Projector Fine-tuning
+### Stage 2: SFT for molecule-aware CoT
 ```bash
 bash scripts/training/train_stage2.sh
 ```
 
-### Stage 3: TaskThinker & BioUpdater Integration
+### Stage 3: Chemistry-aware latent mind activation
 ```bash
 bash scripts/training/train_stage3.sh
 ```
 
-### Stage 4: GRPO Reinforcement Learning
+### Stage 4: GRPO with latent thinking budget
 ```bash
 # Note: If sklearn throws ValueError: node array from the pickle has an incompatible dtype, you can run the following command to fix oracle compatibility.
 cd code_train_sft/reward_utils
