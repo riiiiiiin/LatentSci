@@ -32,6 +32,15 @@ pip install --no-cache-dir pytorch-fast-transformers==0.4.0
 # Note: You may see compatibility errors during these steps; they can be safely ignored.
 pip install PyTDC
 pip install transformers==4.57.3 accelerate==1.10.1
+
+# Optional: Update tdc oracles
+# Note: If sklearn throws ValueError: node array from the pickle has an incompatible dtype, you can run the following command to fix oracle compatibility.
+cd code_train_sft/reward_utils
+python ../../utils/prefetch_tdc_oracles.py --force --verify
+
+# or
+cd eval
+python ../utils/prefetch_tdc_oracles.py --force --verify
 ```
 
 ---
