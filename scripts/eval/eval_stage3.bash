@@ -214,7 +214,7 @@ SCRIPT_PATH="code_train_sft/inference.py"
 OUTPUT_DIR="outputs/${EXP_NAME}"
 LORA_PATH="${CKPT_DIR}/lora_weights"
 PROJECTOR_PATH="${CKPT_DIR}/mm_projector.pt"
-DATA_PATH="test_data/${DATASET_NAME}"
+DATA_PATH="test-data/${DATASET_NAME}"
 
 PYTHON_BIN="python"
 
