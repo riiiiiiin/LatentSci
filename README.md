@@ -8,6 +8,10 @@
 
 This is the official repository for our paper "LatentChem: From Textual CoT to Latent Thinking in Chemical Reasoning." Through our study, we found that continuous latent thinking is a superior substrate for chemical reasoning over explicit CoT, overcoming the modality mismatch between language and chemical logic.
 
+<div align="center">
+  <img src="./assets/modality-mismatch.png" width="90%" height="auto"/>
+</div>
+
 ---
 
 ## 🛠 Installation
