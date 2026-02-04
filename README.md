@@ -32,15 +32,6 @@ pip install --no-cache-dir pytorch-fast-transformers==0.4.0
 # Note: You may see compatibility errors during these steps; they can be safely ignored.
 pip install PyTDC
 pip install transformers==4.57.3 accelerate==1.10.1
-
-# Optional: Update tdc oracles
-# Note: If sklearn throws ValueError: node array from the pickle has an incompatible dtype, you can run the following command to fix oracle compatibility.
-cd code_train_sft/reward_utils
-python ../../utils/prefetch_tdc_oracles.py --force --verify
-
-# or
-cd eval
-python ../utils/prefetch_tdc_oracles.py --force --verify
 ```
 
 ---
@@ -88,6 +79,10 @@ bash scripts/training/train_stage3.sh
 
 ### Stage 4: GRPO Reinforcement Learning
 ```bash
+# Note: If sklearn throws ValueError: node array from the pickle has an incompatible dtype, you can run the following command to fix oracle compatibility.
+cd code_train_sft/reward_utils
+python ../../utils/prefetch_tdc_oracles.py --force --verify
+
 bash scripts/training/train_stage4_grpo.sh
 ```
 
@@ -118,6 +113,10 @@ ckpt_dir
 We provide a comprehensive inference-evaluation pipeline. You can customize `CUDA_DEVICES`, `BATCH_SIZE`, and `DATASET_NAME` within the script.
 
 ```bash
+# Note: If sklearn throws ValueError: node array from the pickle has an incompatible dtype, you can run the following command to fix oracle compatibility.
+cd eval
+python ../utils/prefetch_tdc_oracles.py --force --verify
+
 # Example: Running evaluation on the provided checkpoint
 bash scripts/eval/eval_stage3.bash \
     --exp_name <your_exp_name> \
