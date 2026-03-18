@@ -290,6 +290,7 @@ _MOLOPT_EVALUATER_CACHE: dict[str, object] = {}
 
 
 def _ensure_bench_reward_utils_importable() -> None:
+    # TODO:S
     global _BENCH_REWARD_UTILS_ON_PATH
     if _BENCH_REWARD_UTILS_ON_PATH:
         return

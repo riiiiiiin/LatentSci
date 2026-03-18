@@ -266,6 +266,7 @@ def coconut_tokenize(
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": None,
+            # TODO:S
             "smiles": example.get("input_smiles"),
         }
 
@@ -305,6 +306,7 @@ def coconut_tokenize(
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
+        # TODO:S
         "smiles": example.get("input_smiles"),
     }
 
@@ -332,6 +334,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": None,
+            # TODO:S
             "smiles": example.get("input_smiles") or "",
         }
 
@@ -380,6 +383,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
+        # TODO:S
         "smiles": example.get("input_smiles") or "",
     }
 

@@ -73,6 +73,7 @@ def main() -> int:
     print("")
 
     # Match our GRPO reward path: reward_utils/ChemCoTBench/core/eval_metric.py
+    # TODO:S
     repo_root = script_dir.parent
     reward_utils_dir = repo_root / "code_train_sft" / "reward_utils"
     sys.path.insert(0, str(reward_utils_dir))

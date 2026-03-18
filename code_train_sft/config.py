@@ -22,10 +22,12 @@ class ModelConfig:
     DEFAULT_QWEN_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../models/Qwen3-8B-Base"))
     
     # SMI-TED 模型文件夹和权重文件名
+    # TODO:S
     DEFAULT_SMI_TED_FOLDER = os.path.abspath(os.path.join(CURRENT_DIR, "../models/smi-ted"))
     DEFAULT_SMI_TED_CKPT = "smi-ted-Light_40.pt"
     
     # 数据集路径
+    # TODO:S
     DEFAULT_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot"))
     TEST_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench"))
     

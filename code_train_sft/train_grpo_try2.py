@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover
 from config import ModelConfig
 from dataloader import load_grpo_data
 from model_stage3 import Qwen3MoleculeLLM
+# TODO:S
 from trainer_try2.grpo_trainer import QwenMoleculeGRPOTrainer
 from trainer_try2.grpo_config import GRPOConfig
 from trainer_try2.reward_func import (
@@ -98,6 +99,7 @@ def _ensure_lora_and_trainables(
     *,
     freeze_llm: bool = False,
     freeze_projector: bool = False,
+    # TODO:M
     freeze_bio_updater: bool = False,
     freeze_bioupdater_gate: bool = False,
     freeze_bio_thinker: bool = False,
@@ -145,6 +147,7 @@ def _ensure_lora_and_trainables(
         for p in model.projector.parameters():
             p.requires_grad = True
     both_latent = bool(model.is_both_latent)
+    # TODO:M
     bioupdater_enabled = both_latent or bool(model.is_bioupdater)
     biothinker_enabled = both_latent or bool(model.is_biothinker)
     taskthinker_enabled = both_latent or bool(model.is_taskthinker)
@@ -185,6 +188,7 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         device = next(model.parameters()).device
         checkpoint = torch.load(mm_projector_path, map_location=device)
         model.projector.load_state_dict(checkpoint["projector"])
+        # TODO:M
         model.bio_updater.load_state_dict(checkpoint.get("bio_updater", {}), strict=False)
         if getattr(model, "bio_updater_gate", None) is not None:
             model.bio_updater_gate.load_state_dict(checkpoint.get("bio_updater_gate", {}), strict=False)
@@ -266,6 +270,7 @@ def main():
         default=False,
         help="Freeze the bio_updater module (memory update).",
     )
+    # TODO:M
     parser.add_argument(
         "--freeze_bioupdater_gate",
         type=lambda x: (str(x).lower() == "true"),
@@ -363,6 +368,7 @@ def main():
         default=True,
         help="Enable task-latent generation via is_both_latent (stage=4/5 requires true).",
     )
+    # TODO:M
     parser.add_argument(
         "--is_biothinker",
         type=lambda x: (str(x).lower() == "true"),
@@ -512,6 +518,7 @@ def main():
         is_taskthinker=bool(args.is_taskthinker),
         is_bioupdater=bool(args.is_bioupdater),
         taskthinker_type=str(args.taskthinker_type),
+        # TODO:M
         is_biothinker_multi=bool(args.is_biothinker_multi),
         is_taskthinker_multi=bool(args.is_taskthinker_multi),
         is_bioupdater_multi=bool(args.is_bioupdater_multi),
@@ -530,6 +537,7 @@ def main():
     # 3) Ensure trainables
     _ensure_lora_and_trainables(
         model,
+        # TODO:M
         freeze_llm=bool(args.freeze_llm),
         freeze_projector=bool(args.freeze_projector),
         freeze_bio_updater=bool(args.freeze_bio_updater),
@@ -642,6 +650,7 @@ def main():
     os.makedirs(lora_dir, exist_ok=True)
     model.model.save_pretrained(lora_dir)
     mm_path = os.path.join(final_dir, "mm_projector.pt")
+    # TODO:M
     to_save = {"projector": model.projector.state_dict(), "bio_updater": model.bio_updater.state_dict()}
     if getattr(model, "bio_updater_gate", None) is not None:
         to_save["bio_updater_gate"] = model.bio_updater_gate.state_dict()
