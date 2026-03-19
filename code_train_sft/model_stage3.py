@@ -12,7 +12,8 @@ from config import ModelConfig
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from smi_ted_light.loadnew import load_smi_ted
+from reflection_factory import get_domain_specific_func
+load_sci_embedder = get_domain_specific_func("load_sci_embedder")
 import torch.nn.functional as F
 from transformers.generation.utils import GenerationConfig
 from typing import Optional, List
@@ -523,7 +524,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # ---- 2. 分子编码器和投影器 ----
         # 加载预训练的分子编码器（SMI-TED）
         # TODO:S
-        self.mol_encoder = load_smi_ted(
+        self.mol_encoder = load_sci_embedder(
             folder=self.smi_ted_folder,
             ckpt_filename=self.smi_ted_ckpt
         )
@@ -1875,6 +1876,102 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         return outputs
 
+def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_path=None):
+    """
+    Unified loader for Stage 3: loads LoRA weights and combined Projector + Bio Updater weights.
+    Assumes unified multi-modal checkpoint format.
+    """
+    from peft import PeftModel
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    def _ensure_exists(path: str, *, kind: str) -> None:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{kind} path does not exist: {path}")
+
+    def _ensure_is_dir(path: str, *, kind: str) -> None:
+        if not os.path.isdir(path):
+            raise NotADirectoryError(f"{kind} path must be a directory: {path}")
+
+    def _ensure_is_file(path: str, *, kind: str) -> None:
+        if not os.path.isfile(path):
+            raise IsADirectoryError(f"{kind} path must be a file: {path}")
+
+    def _require_ckpt_key(ckpt: dict, key: str, *, path: str) -> None:
+        if key not in ckpt:
+            found = ", ".join(sorted(map(str, ckpt.keys())))
+            raise KeyError(f"Checkpoint {path} is missing key '{key}'. Found keys: [{found}]")
+
+    # 1. 加载 LoRA 权重
+    if lora_weights_path:
+        _ensure_exists(lora_weights_path, kind="LoRA")
+        _ensure_is_dir(lora_weights_path, kind="LoRA")
+
+        cfg_path = os.path.join(lora_weights_path, "adapter_config.json")
+        if not os.path.isfile(cfg_path):
+            raise FileNotFoundError(f"LoRA folder is missing required file: {cfg_path}")
+        weight_candidates = [
+            os.path.join(lora_weights_path, "adapter_model.safetensors"),
+            os.path.join(lora_weights_path, "adapter_model.bin"),
+            os.path.join(lora_weights_path, "pytorch_model.bin"),
+        ]
+        if not any(os.path.isfile(p) for p in weight_candidates):
+            raise FileNotFoundError(
+                "LoRA folder is missing adapter weights. Expected one of: "
+                + ", ".join(weight_candidates)
+            )
+
+        logger.info(f"Loading LoRA weights from: {lora_weights_path}")
+        model.model = PeftModel.from_pretrained(
+            model.model, 
+            lora_weights_path,
+            is_trainable=True 
+        )
+    
+    # 2. 加载多模态组合权重 (Projector + Bio Updater)
+    # TODO:M
+    if mm_projector_path:
+        _ensure_exists(mm_projector_path, kind="Multi-modal checkpoint")
+        _ensure_is_file(mm_projector_path, kind="Multi-modal checkpoint")
+
+        logger.info(f"Loading unified multi-modal weights from: {mm_projector_path}")
+        device = next(model.parameters()).device
+        checkpoint = torch.load(mm_projector_path, map_location=device)
+
+        if not isinstance(checkpoint, dict):
+            raise TypeError(
+                f"Expected checkpoint dict in {mm_projector_path}, got: {type(checkpoint)}"
+            )
+        
+        # 直接按组合格式加载
+        _require_ckpt_key(checkpoint, "projector", path=mm_projector_path)
+        model.projector.load_state_dict(checkpoint["projector"])
+        logger.info("Loaded projector weights.")
+
+        if hasattr(model, "bio_updater"):
+            _require_ckpt_key(checkpoint, "bio_updater", path=mm_projector_path)
+            model.bio_updater.load_state_dict(checkpoint["bio_updater"])
+            logger.info("Loaded bio_updater weights.")
+            if getattr(model, "bio_updater_gate", None) is not None and "bio_updater_gate" in checkpoint:
+                model.bio_updater_gate.load_state_dict(checkpoint["bio_updater_gate"])
+                logger.info("Loaded bio_updater_gate weights.")
+
+        if hasattr(model, "bio_thinker"):
+            _require_ckpt_key(checkpoint, "bio_thinker", path=mm_projector_path)
+            model.bio_thinker.load_state_dict(checkpoint["bio_thinker"])
+            logger.info("Loaded bio_thinker weights.")
+            if getattr(model, "bio_thinker_gate", None) is not None and "bio_thinker_gate" in checkpoint:
+                model.bio_thinker_gate.load_state_dict(checkpoint["bio_thinker_gate"])
+                logger.info("Loaded bio_thinker_gate weights.")
+        if hasattr(model, "task_thinker"):
+            _require_ckpt_key(checkpoint, "task_thinker", path=mm_projector_path)
+            model.task_thinker.load_state_dict(checkpoint["task_thinker"])
+            logger.info("Loaded task_thinker weights.")
+            if getattr(model, "task_thinker_gate", None) is not None and "task_thinker_gate" in checkpoint:
+                model.task_thinker_gate.load_state_dict(checkpoint["task_thinker_gate"])
+                logger.info("Loaded task_thinker_gate weights.")
+            
+    return model
 
 if __name__ == "__main__":
     # Test Initialization

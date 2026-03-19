@@ -9,9 +9,10 @@
     - [ ] strong: model-specific + passed prompt key (TODO:S)
         - [x] identify
         - [ ] code
-            - [ ] SciEmbedder has to implement parameters(), eval() and encode()
-            - [ ] DataLoader has to implement load_data(), load_test_data() and load_grpo_data()
-            - [ ] reward funcs has to implement format_reward_answer_tag(), reward_answer_correctness(), reward_answer_correctness_bench(), reward_answer_type_validity(), reward_stage4_corrupt_or_correct(), reward_stage4_double_scaled_correctness(), reward_stage4_scaled_correctness
+            - [x] SciEmbedder has to implement parameters(), eval() and encode()
+            - [x] DataLoader has to implement load_data(), load_test_data() and load_grpo_data()
+            - [x] reward funcs has to implement format_reward_answer_tag(), reward_answer_correctness(), reward_answer_correctness_bench(), reward_answer_type_validity(), reward_stage4_corrupt_or_correct(), reward_stage4_double_scaled_correctness(), reward_stage4_scaled_correctness
+        - [ ] test
     - [ ] medium: passed config (TODO:M)
         - [x] identify
         - [ ] code

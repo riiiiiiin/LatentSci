@@ -21,6 +21,10 @@ class ModelConfig:
     # Qwen 模型路径
     DEFAULT_QWEN_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../models/Qwen3-8B-Base"))
     
+    # Domain Identifier
+    # This will be used in reflection_factory to get the correct sci model, dataloader and reward funcs
+    DOMAIN = "Chemistry"
+
     # SMI-TED 模型文件夹和权重文件名
     # TODO:S
     DEFAULT_SMI_TED_FOLDER = os.path.abspath(os.path.join(CURRENT_DIR, "../models/smi-ted"))

@@ -7,7 +7,8 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
 
 from config import ModelConfig
-from dataloader import load_data
+from reflection_factory import get_domain_specific_func
+load_data = get_domain_specific_func("load_data")
 from model_text import load_qwen3_text_model
 
 

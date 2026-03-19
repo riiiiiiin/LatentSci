@@ -18,8 +18,9 @@ import plotext as plt
 import json
 
 # 导入我们的自定义组件
-from model_stage3 import Qwen3MoleculeLLM
-from dataloader import load_data, COCONUT_TOKENS
+from model_stage3 import Qwen3MoleculeLLM, load_trained_components_stage3
+from reflection_factory import get_domain_specific_func
+load_test_data = get_domain_specific_func("load_test_data")
 from config import ModelConfig
 # from train_sft_stage2 import MultiModalDataCollator, MultiModalSFTTrainer, LoraTrainingMonitorCallback, TerminalPlotCallback
 import torch.nn.functional as F
@@ -32,34 +33,6 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# TODO: extract this logic into model_stage3.py
-from train_stage3 import load_trained_components_stage3
-
-# TODO:S
-# refactor to dataloader
-def load_test_data(test_data_path, include_tasks, max_len=None, pure_text=False):
-    """
-    load test data dispatcher
-    exclude subtasks per-bench here
-    """
-
-    if max_len is None:
-        max_len = ModelConfig.MAX_TEXT_LEN
-
-    logger.info(f"Loading test/eval data from: {test_data_path} (eval_mode=True)")
-
-    if "ChemCoTBench" in test_data_path:
-        # add, delete, sub should be tested in moledit, where include_tasks is set explicitly and exclude_tasks is ignored
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['add', 'delete', 'sub', 'rcr', 'mechsel'], max_len=max_len, pure_text=pure_text)
-        logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
-    elif "ChemCoTDataset" in test_data_path:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=['rcr'], max_len=max_len, pure_text=pure_text)
-        logger.info(f"Loaded tokenized eval dataset ChemCoTBench from dir: {len(dataset)} examples")
-    else:
-        dataset = load_data(test_data_path, include_cot=False, is_coconut=False, eval_mode=True, include_tasks=include_tasks, exclude_tasks=[], max_len=max_len, pure_text=pure_text)
-        logger.info(f"Loaded tokenized eval dataset from dir: {len(dataset)} examples")
-    
-    return dataset
 
 def prepare_evaluation_dataset(
     test_data_path,

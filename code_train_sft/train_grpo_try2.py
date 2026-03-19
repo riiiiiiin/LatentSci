@@ -18,20 +18,19 @@ except Exception:  # pragma: no cover
     plt = None  # type: ignore[assignment]
 
 from config import ModelConfig
-from dataloader import load_grpo_data
-from model_stage3 import Qwen3MoleculeLLM
+from reflection_factory import get_domain_specific_func
+load_grpo_data = get_domain_specific_func("load_grpo_data")
+from model_stage3 import Qwen3MoleculeLLM, load_trained_components_stage3
 # TODO:S
 from trainer_try2.grpo_trainer import QwenMoleculeGRPOTrainer
 from trainer_try2.grpo_config import GRPOConfig
-from trainer_try2.reward_func import (
-    format_reward_answer_tag,
-    reward_answer_correctness,
-    reward_answer_correctness_bench,
-    reward_answer_type_validity,
-    reward_stage4_corrupt_or_correct,
-    reward_stage4_double_scaled_correctness,
-    reward_stage4_scaled_correctness,
-)
+format_reward_answer_tag = get_domain_specific_func("format_reward_answer_tag")
+reward_answer_correctness = get_domain_specific_func("reward_answer_correctness")
+reward_answer_correctness_bench = get_domain_specific_func("reward_answer_correctness_bench")
+reward_answer_type_validity = get_domain_specific_func("reward_answer_type_validity")
+reward_stage4_corrupt_or_correct = get_domain_specific_func("reward_stage4_corrupt_or_correct")
+reward_stage4_double_scaled_correctness = get_domain_specific_func("reward_stage4_double_scaled_correctness")
+reward_stage4_scaled_correctness = get_domain_specific_func("reward_stage4_scaled_correctness")
 
 
 logging.basicConfig(level=logging.INFO)
@@ -171,38 +170,6 @@ def _ensure_lora_and_trainables(
     if taskthinker_enabled and (not freeze_taskthinker_gate) and getattr(model, "task_thinker_gate", None) is not None:
         for p in model.task_thinker_gate.parameters():
             p.requires_grad = True
-
-
-def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_path=None):
-    """
-    Same checkpoint format as `train_stage3.py`:
-    - LoRA weights folder
-    - Combined projector + bio_updater file (mm_projector.pt)
-    """
-    if lora_weights_path and os.path.exists(lora_weights_path):
-        logger.info(f"Loading LoRA weights from: {lora_weights_path}")
-        model.model = PeftModel.from_pretrained(model.model, lora_weights_path, is_trainable=True)
-
-    if mm_projector_path and os.path.exists(mm_projector_path):
-        logger.info(f"Loading unified multi-modal weights from: {mm_projector_path}")
-        device = next(model.parameters()).device
-        checkpoint = torch.load(mm_projector_path, map_location=device)
-        model.projector.load_state_dict(checkpoint["projector"])
-        # TODO:M
-        model.bio_updater.load_state_dict(checkpoint.get("bio_updater", {}), strict=False)
-        if getattr(model, "bio_updater_gate", None) is not None:
-            model.bio_updater_gate.load_state_dict(checkpoint.get("bio_updater_gate", {}), strict=False)
-        if hasattr(model, "bio_thinker"):
-            model.bio_thinker.load_state_dict(checkpoint.get("bio_thinker", {}), strict=False)
-        if getattr(model, "bio_thinker_gate", None) is not None:
-            model.bio_thinker_gate.load_state_dict(checkpoint.get("bio_thinker_gate", {}), strict=False)
-        if hasattr(model, "task_thinker"):
-            model.task_thinker.load_state_dict(checkpoint.get("task_thinker", {}), strict=False)
-        if getattr(model, "task_thinker_gate", None) is not None:
-            model.task_thinker_gate.load_state_dict(checkpoint.get("task_thinker_gate", {}), strict=False)
-        logger.info("Loaded projector (+ bio_updater if present).")
-
-    return model
 
 
 def main():
