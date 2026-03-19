@@ -120,11 +120,11 @@ class TerminalPlotCallback(TrainerCallback):
 class MultiModalDataCollator(DataCollatorForSeq2Seq):
     # ... (保持不变) ...
     def __call__(self, features):
-        # TODO:S
-        smiles = [f.pop("smiles") for f in features]
+        # TODO:W
+        smiles = [f.pop("sci_input") for f in features]
         cot_len = [f.pop("cot_len") for f in features] if features and ("cot_len" in features[0]) else None
         batch = super().__call__(features)
-        batch["smiles"] = smiles
+        batch["sci_input"] = smiles
         if cot_len is not None:
             batch["cot_len"] = torch.tensor(cot_len, dtype=torch.long)
         return batch

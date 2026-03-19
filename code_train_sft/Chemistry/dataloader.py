@@ -270,8 +270,7 @@ def coconut_tokenize(
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": None,
-            # TODO:S
-            "smiles": example.get("input_smiles"),
+            "sci_input": example.get("input_smiles"),
         }
 
     n_skip_steps = min(len(steps), scheduled_stage)
@@ -310,8 +309,7 @@ def coconut_tokenize(
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        # TODO:S
-        "smiles": example.get("input_smiles"),
+        "sci_input": example.get("input_smiles"),
     }
 
 
@@ -338,8 +336,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": None,
-            # TODO:S
-            "smiles": example.get("input_smiles") or "",
+            "sci_input": example.get("input_smiles") or "",
         }
 
     # 根据参数决定是否包含 CoT
@@ -387,8 +384,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        # TODO:S
-        "smiles": example.get("input_smiles") or "",
+        "sci_input": example.get("input_smiles") or "",
     }
 
 

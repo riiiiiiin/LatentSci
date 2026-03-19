@@ -75,11 +75,11 @@ def prepare_evaluation_dataset(
     for local_idx in range(len(dataset)):
         item = dataset[local_idx]
         # Keep the original smiles (not cleaned) as part of metadata
-        # TODO:S
-        smiles_list = item.get("smiles", [])
+        # TODO:W
+        smiles_list = item.get("sci_input", [])
         sample_meta = {
             "sample_id": local_idx * num_procs + proc_index,
-            "smiles": smiles_list,
+            "sci_input": smiles_list, # this is for downstream evaluator
             "task": item.get("task", None),
         }
         per_sample_metadata.append(sample_meta)
@@ -134,8 +134,8 @@ def run_inference_on_dataset(
         for idx in batch_indices:
             item = dataset[idx]
             raw_items.append(item)
-            # TODO:S
-            smiles_list = item.get("smiles", [])
+            # TODO:W
+            smiles_list = item.get("sci_input", [])
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
             smiles_batch.append(cleaned_smiles)
 

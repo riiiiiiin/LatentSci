@@ -21,7 +21,6 @@ from config import ModelConfig
 from reflection_factory import get_domain_specific_func
 load_grpo_data = get_domain_specific_func("load_grpo_data")
 from model_stage3 import Qwen3MoleculeLLM, load_trained_components_stage3
-# TODO:S
 from trainer_try2.grpo_trainer import QwenMoleculeGRPOTrainer
 from trainer_try2.grpo_config import GRPOConfig
 format_reward_answer_tag = get_domain_specific_func("format_reward_answer_tag")

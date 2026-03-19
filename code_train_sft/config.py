@@ -10,6 +10,7 @@ class ModelConfig:
     # --- 数据对齐参数 (Alignment) ---
     # 分子前缀总长度 = num_queries + <mol_start> + <mol_end>
     # 默认 128 + 2 = 130
+    # TODO:M
     SMILES_LEN = NUM_QUERIES + 2 
     
     # --- 数据加载参数 (Data Loading) ---
@@ -25,17 +26,16 @@ class ModelConfig:
     # This will be used in reflection_factory to get the correct sci model, dataloader and reward funcs
     DOMAIN = "Chemistry"
 
-    # SMI-TED 模型文件夹和权重文件名
-    # TODO:S
-    DEFAULT_SMI_TED_FOLDER = os.path.abspath(os.path.join(CURRENT_DIR, "../models/smi-ted"))
-    DEFAULT_SMI_TED_CKPT = "smi-ted-Light_40.pt"
-    
-    # 数据集路径
-    # TODO:S
-    DEFAULT_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot"))
-    TEST_DATA_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "../ChemCotDataset/chemcotbench"))
-    
-    # 训练输出目录
-    DEFAULT_OUTPUT_DIR = os.path.join(CURRENT_DIR, "qwen3_mol_sft_lora_results")
-    TEST_DATA_PATH = os.path.join(CURRENT_DIR, "qwen3_mol_sft_lora_test_results")
+domain_configs = {
+    "Chemistry": {
+        "sci_embedder_folder" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../models/smi-ted")),
+        "sci_embedder_ckpt" : "smi-ted-Light_40.pt",
+        "data_path" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot")),
+        "output_dir" : os.path.join(ModelConfig.CURRENT_DIR, "qwen3_mol_sft_lora_results")
+    }
+}
 
+ModelConfig.DEFAULT_SCI_EMBEDDER_FOLDER = domain_configs[ModelConfig.DOMAIN]["sci_embedder_folder"]
+ModelConfig.DEFAULT_SCI_EMBEDDER_CKPT = domain_configs[ModelConfig.DOMAIN]["sci_embedder_ckpt"]
+ModelConfig.DEFAULT_DATA_PATH = domain_configs[ModelConfig.DOMAIN]["data_path"]
+ModelConfig.DEFAULT_OUTPUT_DIR = domain_configs[ModelConfig.DOMAIN]["output_dir"]

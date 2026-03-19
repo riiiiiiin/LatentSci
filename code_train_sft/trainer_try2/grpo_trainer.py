@@ -288,11 +288,13 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 with gather_if_zero3([param]):
                     llm_model.load_weights([(name, param.data)])
 
-    # TODO:S
     def _extract_smiles_from_inputs(self, inputs: list[dict[str, Any]]) -> list[list[str]]:
         if not inputs:
             return []
-        if "smiles" in inputs[0]:
+        # TODO:M
+        if "sci_input" in inputs[0]:
+            smiles = [ex.get("sci_input") for ex in inputs]
+        elif "smiles" in inputs[0]:
             smiles = [ex.get("smiles") for ex in inputs]
         else:
             smiles = [ex.get("input_smiles") for ex in inputs]
@@ -319,9 +321,8 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         else:
             self._current_corrupt_task_latents = None
 
-        # TODO:S
         output = super()._generate_and_score_completions(inputs)
-        output["smiles"] = self._current_smiles
+        output["sci_input"] = self._current_smiles
 
         # Stage 4: thread corruption flags + latent counts to loss computation, and mask out corrupted-but-wrong samples.
         if self.training_stage in (4, 5) and self._current_corrupt_task_latents is not None:
@@ -370,7 +371,7 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         if smiles is None or len(smiles) != prompt_ids.size(0):
             raise RuntimeError(
                 "Internal error: missing/size-mismatched smiles for generation. "
-                f"smiles={None if smiles is None else len(smiles)}, batch={prompt_ids.size(0)}."
+                f"sci_input={None if smiles is None else len(smiles)}, batch={prompt_ids.size(0)}."
             )
 
         # vLLM path: build prompt_embeds (HF side), then generate token ids using vLLM.
@@ -717,11 +718,13 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         # entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         # return logps, entropies
 
-    # TODO:S
+    # TODO:M
     def _compute_loss(self, model, inputs):
         # Ensure the current batch's `smiles` is visible to `_get_per_token_logps_and_entropies` when the parent
         # implementation calls it (it doesn't thread `smiles` explicitly).
-        if "smiles" in inputs:
+        if "sci_input" in inputs:
+            self._current_smiles = inputs["sci_input"]
+        elif "smiles" in inputs:
             self._current_smiles = inputs["smiles"]
         if "corrupt_task_latents" in inputs:
             val = inputs["corrupt_task_latents"]

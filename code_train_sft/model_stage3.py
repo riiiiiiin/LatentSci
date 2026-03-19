@@ -442,9 +442,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.num_queries = mol_config.get('num_queries', 128)
         self.mol_input_dim = mol_config.get('input_dim', 768)
         self.mol_num_heads = mol_config.get('num_heads', 8)
-        # TODO:S
-        self.smi_ted_folder = mol_config.get('smi_ted_folder', ModelConfig.DEFAULT_SMI_TED_FOLDER)
-        self.smi_ted_ckpt = mol_config.get('smi_ted_ckpt', ModelConfig.DEFAULT_SMI_TED_CKPT)
+        # TODO:W
+        self.smi_ted_folder = mol_config.get('sci_embedder_folder', ModelConfig.DEFAULT_SCI_EMBEDDER_FOLDER)
+        self.smi_ted_ckpt = mol_config.get('sci_embedder_ckpt', ModelConfig.DEFAULT_SCI_EMBEDDER_CKPT)
         self.is_coconut = bool(is_coconut)
         self.is_both_latent = bool(is_both_latent)
         # TODO:M
@@ -479,7 +479,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.config._name_or_path = qwen_model_name
 
         # 添加分子特殊标记
-        # TODO:S
         self.extra_tokens = [
             "<mol_start>",
             "<mol_end>",
@@ -508,7 +507,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.model.resize_token_embeddings(new_vocab_size)
         
         # 获取特殊标记的ID
-        # TODO:S
         self.start_id = self.tokenizer.convert_tokens_to_ids("<mol_start>")
         self.end_id = self.tokenizer.convert_tokens_to_ids("<mol_end>")
         self.latent_id = self.tokenizer.convert_tokens_to_ids("<latent>")
@@ -523,7 +521,7 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         # ---- 2. 分子编码器和投影器 ----
         # 加载预训练的分子编码器（SMI-TED）
-        # TODO:S
+        # TODO:M
         self.mol_encoder = load_sci_embedder(
             folder=self.smi_ted_folder,
             ckpt_filename=self.smi_ted_ckpt
@@ -811,8 +809,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         增强版前向传播：支持分子证据精炼与逆向干扰
         """
-        # TODO:S
-        smiles_list = kwargs.pop("smiles", None)
+        # TODO:W
+        smiles_list = kwargs.pop("sci_input", None)
         do_perturb = kwargs.pop("do_perturb", False) # 是否执行逆向干扰 (Counterfactual perturbation)
         use_coconut = bool(kwargs.pop("is_coconut", self.is_coconut))
         use_both_latent = bool(kwargs.pop("is_both_latent", self.is_both_latent))
@@ -839,9 +837,9 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         cot_len = kwargs.pop("cot_len", None)
         max_cot_string_len = int(kwargs.pop("max_cot_string_len", self.max_cot_string_len))
 
-        # TODO:S
+        # TODO:W
         if smiles_list is None:
-            raise ValueError("必须提供smiles参数")
+            raise ValueError("Sci Input list must be passed")
 
         B = len(smiles_list)
         device = self.model.device
