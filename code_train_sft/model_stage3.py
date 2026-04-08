@@ -123,7 +123,6 @@ class BioTokenUpdater(nn.Module):
         )
         self.norm_ffn = nn.LayerNorm(d_llm)
 
-    #TODO:W
     def forward(self, bio_embeds, latent_states):
         """
         bio_embeds: [B, N_bio, d_llm]
@@ -139,7 +138,6 @@ class BioTokenUpdater(nn.Module):
         return bio_embeds
 
 
-#TODO:W
 class BioTokenUpdaterMulti(nn.Module):
     """
     Multi-expert variant of BioTokenUpdater: replaces the FFN MLP with 4 FFN "experts" and
@@ -167,7 +165,6 @@ class BioTokenUpdaterMulti(nn.Module):
             nn.init.kaiming_uniform_(self.w2[e], a=math.sqrt(5))
         self.norm_ffn = nn.LayerNorm(d_llm)
 
-    #TODO:W
     def forward(self, bio_embeds: torch.Tensor, latent_states: torch.Tensor) -> torch.Tensor:
         """
         bio_embeds: [B, N_bio, d_llm]
@@ -238,7 +235,6 @@ class SinusoidalPositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(sinusoid_inp).to(dtype=x.dtype)
         return pe.unsqueeze(0)
 
-#TODO:W
 class BioThinker(nn.Module):
     def __init__(self, d_model: int, nhead: int, dropout: float = 0.0, dim_feedforward: Optional[int] = None):
         super().__init__()

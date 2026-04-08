@@ -678,6 +678,17 @@ def train_stage3():
             max_len=args.max_seq_length
         )
 
+        if ModelConfig.VAL_SPLIT:
+            val_dataset = load_data(
+                args.data_path,
+                split = "val",
+                include_cot=include_cot,
+                is_coconut=is_coconut,
+                scheduled_stage=stage,
+                c_thought=args.c_thought,
+                max_len=args.max_seq_length
+            )
+
         # 2.3 配置当前 Stage 的输出目录
         stage_suffix = f"stage{args.training_stage}_sub{stage}" if is_coconut else f"stage{args.training_stage}"
         stage_output_dir = os.path.join(args.output_dir, stage_suffix)
@@ -701,6 +712,9 @@ def train_stage3():
             "optim": "adamw_8bit",
             "lr_scheduler_type": "cosine",
             "weight_decay": 0.01,
+            "eval_strategy": "steps" if ModelConfig.VAL_SPLIT else "no",
+            "eval_steps": 100,
+            "per_device_eval_batch_size": args.batch_size,
         }
         
         # 检查 SFTConfig 支持哪个参数名 (max_seq_length 还是 max_length)
@@ -729,6 +743,7 @@ def train_stage3():
             model=model,
             args=training_args,
             train_dataset=train_dataset,
+            eval_dataset=val_dataset if ModelConfig.VAL_SPLIT else None,
             processing_class=tokenizer,
             data_collator=data_collator,
             cf_lambda=args.cf_lambda,

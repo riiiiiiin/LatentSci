@@ -24,21 +24,27 @@ class ModelConfig:
     # Domain Identifier
     # This will be used in reflection_factory to get the correct sci model, dataloader and reward funcs
     DOMAIN = "Chemistry"
+    VAL_SPLIT = False
 
 domain_configs = {
     "Chemistry": {
         "sci_embedder_folder" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../models/smi-ted")),
         "sci_embedder_ckpt" : "smi-ted-Light_40.pt",
         "data_path" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot")),
-        "output_dir" : os.path.join(ModelConfig.CURRENT_DIR, "qwen3_mol_sft_lora_results")
+        "output_dir" : os.path.join(ModelConfig.CURRENT_DIR, "qwen3_mol_sft_lora_results"),
+        "val_split" : False
     },
     "DNA": {
         "sci_embedder_folder" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../models/evo2_1b_base")),
         "sci_embedder_ckpt" : "evo2_1b_base.pt",
-    }
+        "data_path" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../data/kegg/data")),
+        "output_dir" : os.path.join(ModelConfig.CURRENT_DIR, "qwen3_dna_sft_lora_results"),
+        "val_split" : False
+    },
 }
 
 ModelConfig.DEFAULT_SCI_EMBEDDER_FOLDER = domain_configs[ModelConfig.DOMAIN]["sci_embedder_folder"]
 ModelConfig.DEFAULT_SCI_EMBEDDER_CKPT = domain_configs[ModelConfig.DOMAIN]["sci_embedder_ckpt"]
 ModelConfig.DEFAULT_DATA_PATH = domain_configs[ModelConfig.DOMAIN]["data_path"]
 ModelConfig.DEFAULT_OUTPUT_DIR = domain_configs[ModelConfig.DOMAIN]["output_dir"]
+ModelConfig.VAL_SPLIT = domain_configs[ModelConfig.DOMAIN]["val_split"]

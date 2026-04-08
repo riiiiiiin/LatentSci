@@ -393,6 +393,7 @@ def llm_tokenize(example, include_cot=True, max_len=ModelConfig.MAX_TEXT_LEN, is
 # --------------------------------
 def load_data(
     path, 
+    split='train',
     include_cot=True, 
     max_len=ModelConfig.MAX_TEXT_LEN,
     is_coconut=False,
@@ -417,7 +418,7 @@ def load_data(
 
     data_files = [f for f in all_json_files if filter_data(f)]
 
-    ds = load_dataset("json", data_files=data_files)["train"]
+    ds = load_dataset("json", data_files=data_files)[split]
 
     bad_ids = [
         "f7e567a6-47de-4c77-8c1f-9049689322e8",
@@ -503,7 +504,7 @@ def load_test_data(test_data_path, include_tasks, max_len=None, pure_text=False)
 # --------------------------------
 # 3b. GRPO prompt-only dataset (for RL)
 # --------------------------------
-def load_grpo_data(path):
+def load_grpo_data(path, split="train"):
     """
     Load a prompt-only dataset for GRPO-style RL training.
 
@@ -518,7 +519,7 @@ def load_grpo_data(path):
     all_json_files = glob.glob(os.path.join(path, "**/*.json"), recursive=True)
     data_files = [f for f in all_json_files if not f.endswith("rcr.json")]
     from datasets import load_dataset
-    ds = load_dataset("json", data_files=data_files)["train"]
+    ds = load_dataset("json", data_files=data_files)[split]
 
     # 过滤已知损坏的数据 ID
     bad_ids = [
