@@ -31,6 +31,10 @@ domain_configs = {
         "sci_embedder_ckpt" : "smi-ted-Light_40.pt",
         "data_path" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../ChemCotDataset/chemcotbench-cot")),
         "output_dir" : os.path.join(ModelConfig.CURRENT_DIR, "qwen3_mol_sft_lora_results")
+    },
+    "DNA": {
+        "sci_embedder_folder" : os.path.abspath(os.path.join(ModelConfig.CURRENT_DIR, "../models/evo2_1b_base")),
+        "sci_embedder_ckpt" : "evo2_1b_base.pt",
     }
 }
 
