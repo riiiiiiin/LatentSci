@@ -19,7 +19,6 @@ from transformers.generation.utils import GenerationConfig
 from typing import Optional, List
 
 
-# TODO:W
 @dataclass
 class BioLatentCausalLMOutputWithPast(CausalLMOutputWithPast):
     ce_loss: Optional[torch.Tensor] = None
@@ -112,7 +111,6 @@ class QueryAttentionProjector(nn.Module):
 # ============================
 # 1b. Stage 3 Memory Updater: 更新 BIO Token 的隐藏状态
 # ============================
-# TODO:W
 class BioTokenUpdater(nn.Module):
     def __init__(self, d_llm, nhead=8):
         super().__init__()
@@ -309,7 +307,6 @@ class _TransformerEncoderLayerMultiFFN(nn.Module):
         x = self.norm2(x + self.dropout2(out))
         return x
 
-# TODO:W
 class BioThinkerMulti(nn.Module):
     """
     Multi-expert variant of BioThinker: replaces the Transformer FFN with 4 FFN experts mixed by a softmax gate.
@@ -392,8 +389,6 @@ class TaskThinkerMulti(nn.Module):
 # ============================
 # 2. 多模态融合模型 (兼容trl的SFTTrainer)
 # ============================
-# TODO:W
-# TODO:M
 class Qwen3MoleculeLLM(PreTrainedModel):
     def __init__(
         self,
@@ -442,12 +437,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.num_queries = mol_config.get('num_queries', 128)
         self.mol_input_dim = mol_config.get('input_dim', 768)
         self.mol_num_heads = mol_config.get('num_heads', 8)
-        # TODO:W
         self.smi_ted_folder = mol_config.get('sci_embedder_folder', ModelConfig.DEFAULT_SCI_EMBEDDER_FOLDER)
         self.smi_ted_ckpt = mol_config.get('sci_embedder_ckpt', ModelConfig.DEFAULT_SCI_EMBEDDER_CKPT)
         self.is_coconut = bool(is_coconut)
         self.is_both_latent = bool(is_both_latent)
-        # TODO:M
         self.is_biothinker = bool(is_biothinker)
         self.is_taskthinker = bool(is_taskthinker)
         self.is_bioupdater = bool(is_bioupdater)
@@ -521,14 +514,12 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         # ---- 2. 分子编码器和投影器 ----
         # 加载预训练的分子编码器（SMI-TED）
-        # TODO:M
         self.mol_encoder = load_sci_embedder(
             folder=self.smi_ted_folder,
             ckpt_filename=self.smi_ted_ckpt
         )
         
         # 冻结分子编码器参数
-        # TODO:W
         for param in self.mol_encoder.parameters():
             param.requires_grad = False
         self.mol_encoder.eval()
@@ -544,7 +535,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         self.projector.to(self.model.dtype)
 
         # ---- Stage 3: Bio Token Updater ----
-        # TODO:W
         if self.is_bioupdater_multi:
             self.bio_updater = BioTokenUpdaterMulti(d_llm=self.d_llm, nhead=self.mol_num_heads)
         else:
@@ -556,7 +546,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             self.bio_updater_gate.to(self.model.dtype)
 
         # ---- Stage 3: Bio Thinker (optional) ----
-        # TODO:W
         if self.is_biothinker_multi:
             self.bio_thinker = BioThinkerMulti(
                 d_model=self.d_llm,
@@ -576,7 +565,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             self.bio_thinker_gate.to(self.model.dtype)
 
         # ---- Stage 3: Task Thinker (optional) ----
-        # TODO:W
         if self.is_taskthinker_multi:
             self.task_thinker = TaskThinkerMulti(d_model=self.d_llm, dropout=self.task_thinker_dropout)
         else:
@@ -644,7 +632,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         if hasattr(self.model, "gradient_checkpointing_disable"):
             self.model.gradient_checkpointing_disable()
 
-    # TODO:W
     def _bioupdater_with_gating(self, bio_embeds: torch.Tensor, latent_states: torch.Tensor) -> torch.Tensor:
         refined = self.bio_updater(bio_embeds, latent_states)
         if not self.is_bioupdater_gating:
@@ -655,7 +642,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         gate = self.bio_updater_gate(latent_states[:, -1, :], out_dtype=refined.dtype)
         return refined * gate + bio_embeds * (1.0 - gate)
 
-    # TODO:W
     def _taskthinker_with_gating(self, x: torch.Tensor) -> torch.Tensor:
         if self.taskthinker_type == "identity":
             return x
@@ -675,7 +661,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         gate = self.task_thinker_gate(gate_in, out_dtype=delta.dtype)
         return x + delta * gate
 
-    # TODO:W
     def _apply_latent_feedback(
         self,
         initial_embeds,
@@ -702,7 +687,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # if not has_lora_in_backbone:
         #     raise RuntimeError("Expected LoRA layers in `llm.model` (backbone), but none was detected.")
 
-        # TODO:W
         curr_embeds = initial_embeds
         bioupdater_gate_cache = None
         for pass_idx in range(max_n_latents):
@@ -719,7 +703,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
             # If gating is enabled, compute it once at the very beginning (pass 0) from the token *before* the first
             # latent position (for task-latent blocks, this is the <start_latent> token).
-            # TODO:W
             if (
                 pass_idx == 0
                 and self.is_bioupdater_gating
@@ -742,7 +725,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     bioupdater_gate_cache[torch.tensor(gate_indices, device=anchor.device, dtype=torch.long)] = gate
 
             # --- Evidence Refinement (Memory Write) ---
-            # TODO:W
             if refine_bio_tokens and bio_positions is not None:
                 # 1. 识别当前 Pass 需要更新的 Batch 索引
                 active_indices = [b for b in range(B) if bio_positions[b] and len(latent_positions[b]) > pass_idx]
@@ -809,18 +791,15 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         """
         增强版前向传播：支持分子证据精炼与逆向干扰
         """
-        # TODO:W
         smiles_list = kwargs.pop("sci_input", None)
         do_perturb = kwargs.pop("do_perturb", False) # 是否执行逆向干扰 (Counterfactual perturbation)
         use_coconut = bool(kwargs.pop("is_coconut", self.is_coconut))
         use_both_latent = bool(kwargs.pop("is_both_latent", self.is_both_latent))
-        # TODO:M
         use_biothinker_flag = bool(kwargs.pop("is_biothinker", self.is_biothinker))
         use_taskthinker_flag = bool(kwargs.pop("is_taskthinker", self.is_taskthinker))
         use_bioupdater_flag = bool(kwargs.pop("is_bioupdater", self.is_bioupdater))
 
         # If `is_both_latent=True`, always enable all three modules regardless of per-module flags.
-        # TODO:W
         if use_both_latent:
             use_biothinker = True
             use_taskthinker = True
@@ -829,7 +808,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             use_biothinker = use_biothinker_flag
             use_taskthinker = use_taskthinker_flag
             use_bioupdater = use_bioupdater_flag
-        # TODO:M
         bio_latent_lambda = float(kwargs.pop("bio_latent_lambda", self.bio_latent_lambda))
         bio_latent_alpha = float(kwargs.pop("bio_latent_alpha", self.bio_latent_alpha))
         task_latent_lambda = float(kwargs.pop("task_latent_lambda", self.task_latent_lambda))
@@ -837,7 +815,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         cot_len = kwargs.pop("cot_len", None)
         max_cot_string_len = int(kwargs.pop("max_cot_string_len", self.max_cot_string_len))
 
-        # TODO:W
         if smiles_list is None:
             raise ValueError("Sci Input list must be passed")
 
@@ -849,10 +826,8 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         with torch.no_grad():
             # mol_emb_nested: [[Tensor(L1, 768), Tensor(L2, 768)], [Tensor(L3, 768)]]
-            # TODO:W
             mol_emb_nested = self.mol_encoder.encode(smiles_list)
 
-        # TODO:W
         flat_mols = []
         mol_counts = []
         for sample_mols in mol_emb_nested:
@@ -861,7 +836,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         if flat_mols:
             # 批量投影：将不同长度的分子特征 Padding 到 Batch 内最长长度
-            # TODO:W
             max_L_mol = max(m.size(0) for m in flat_mols)
             padded_mols = torch.zeros(len(flat_mols), max_L_mol, self.mol_input_dim, device=device, dtype=self.model.dtype)
             mol_key_padding_mask = torch.ones(len(flat_mols), max_L_mol, device=device, dtype=torch.bool)
@@ -879,7 +853,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 获取 LLM 嵌入层
         embed = self.model.get_input_embeddings()
         with torch.no_grad():
-            # TODO:W
             start_emb = embed(torch.tensor([[self.start_id]], device=device)) # [1, 1, d_llm]
             end_emb = embed(torch.tensor([[self.end_id]], device=device))   # [1, 1, d_llm]
             start_bio_latent_emb = embed(torch.tensor([[self.start_bio_latent_id]], device=device))
@@ -900,7 +873,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         fused_samples_list = []
         fused_labels_list = []
-        # TODO:W
         bio_positions_list = [] # Stage 3: 记录每个 sample 中 bio token 的索引
         bio_latent_positions_list = []  # 记录每个 sample 的 bio latent token 索引（绝对位置）
         bio_latent_targets_list = []    # 每个 sample 的 v targets（长度 = #smiles），不参与梯度
@@ -913,7 +885,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         for b in range(B):
             # 2.1 构造分子部分
-            # TODO:W
             sample_mol_parts = []
             b_bio_indices = []
             current_mol_offset = 0
@@ -949,7 +920,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             
             bio_positions_list.append(b_bio_indices)
             bio_latent_targets_list.append(b_targets)
-            # TODO:W
             mol_part = torch.cat(sample_mol_parts, dim=1) if sample_mol_parts else torch.zeros(1, 0, self.d_llm, device=device, dtype=self.model.dtype)
 
             # 2.2 提取真实文本内容 (通过 Mask 提取非 Padding 部分)
@@ -982,7 +952,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             prompt_spans_list.append(prompt_span)
 
             # 2.2b 在 prompt 和 response 之间插入 Bio Latent tokens（数量 = smiles 个数）
-            # TODO:W
             n_bio_latents = mol_counts[b]
             bio_latent_block = None
             bio_latent_block_len = 0
@@ -1033,7 +1002,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             task_latent_positions_list.append(task_latent_positions)
 
             # 2.3 融合
-            # TODO:W
             parts = [mol_part, prompt_emb.unsqueeze(0)]
             if bio_latent_block is not None:
                 parts.append(bio_latent_block)
@@ -1054,12 +1022,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 resp_lab = t_lab_masked[prompt_len:]
 
                 # Molecule tokens: always masked
-                # TODO:W
                 mol_lab = torch.full((1, mol_part.size(1)), -100, device=device, dtype=t_lab_masked.dtype)
                 lab_parts = [mol_lab, prompt_lab.unsqueeze(0)]
 
                 # Bio-latent tokens: always masked
-                # TODO:W
                 if bio_latent_block_len > 0:
                     bio_lab = torch.full((1, bio_latent_block_len), -100, device=device, dtype=t_lab_masked.dtype)
                     lab_parts.append(bio_lab)
@@ -1100,7 +1066,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
         # =========================================================
-        # TODO:W
         if use_biothinker and any(bio_latent_positions_list):
             # IMPORTANT: BioThinker is a bidirectional (encoder) block; it must NOT see teacher-forced response tokens.
             # We mask everything after the end of the bio-latent block as padding for BioThinker.
@@ -1153,7 +1118,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 4. Coconut 潜空间推理逻辑 (如果包含 <latent>)
         # =========================================================
-        # TODO:W
         has_latent = (input_ids == self.latent_id).any().item()
         kwargs.pop("refine_bio_tokens", None)
         refine_bio_tokens = bool(use_bioupdater)
@@ -1250,7 +1214,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # 5. Bio latent alignment loss (optional)
         # Loss = avg_i max(0, alpha - cos(v_i, mu_i)), where v_i is detached.
         # =========================================================
-        # TODO:W
         ce_loss = outputs.loss
         if ce_loss is None:
             # GRPO log-prob computation (and some inference paths) call `forward()` without labels.
@@ -1332,7 +1295,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                 total_loss = total_loss + task_latent_loss_scaled
                 task_latent_active = True
 
-        # TODO:W
         out = BioLatentCausalLMOutputWithPast(
             loss=total_loss,
             logits=outputs.logits,
@@ -1349,7 +1311,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         )
         return out
 
-    # TODO:W
     def get_prompt_embeddings(
         self,
         smiles_list: List[List[str]],
@@ -1372,7 +1333,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         device = input_ids.device
         B = input_ids.size(0)
         use_both_latent = bool(self.is_both_latent)
-        # TODO:W
         if use_both_latent:
             use_biothinker = True
             use_taskthinker = True
@@ -1396,7 +1356,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         self._last_task_latent_counts = [0 for _ in range(B)]
         # If `is_both_latent=True`, BioUpdater is always enabled. Otherwise it's controlled by `is_bioupdater`.
-        # TODO:W
         refine_bio_tokens = True if use_both_latent else (bool(refine_bio_tokens) and use_bioupdater)
 
         # NOTE: This function is used both for generation (call under `torch.no_grad()` / `torch.inference_mode()`)
@@ -1405,7 +1364,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 1. Molecule features: flatten + batch projection
         # =========================================================
-        # TODO:W
         with torch.no_grad():
             mol_emb_nested = self.mol_encoder.encode(smiles_list)
 
@@ -1432,7 +1390,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
             flat_feats_llm = []
 
         # LLM embedding layer
-        # TODO:W
         embed = self.model.get_input_embeddings()
         start_emb = embed(torch.tensor([[self.start_id]], device=device))
         end_emb = embed(torch.tensor([[self.end_id]], device=device))
@@ -1445,7 +1402,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 2. Reconstruct + fuse variable-length (strip text padding)
         # =========================================================
-        # TODO:W
         text_emb = embed(input_ids).to(dtype=self.model.dtype)
         fused_samples_list = []
         bio_positions_list = []
@@ -1525,7 +1481,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 3b. Bio thinker: one-pass hidden thoughts for bio-latent tokens
         # =========================================================
-        # TODO:W
         if use_biothinker and any(bio_latent_positions_list):
             # IMPORTANT: BioThinker is bidirectional; mask out the trailing <start_latent> token so it can't
             # (even trivially) influence bio-latent embeddings.
@@ -1583,7 +1538,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         # =========================================================
         # 4. Coconut latent-feedback refinement (optional based on presence of <latent>)
         # =========================================================
-        # TODO:W
         has_latent = (input_ids == self.latent_id).any().item()
         if use_coconut and has_latent and attention_mask is not None:
             latent_positions = []
@@ -1630,7 +1584,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                     task_latent_counts.append(0)
                     continue
                 # We appended <start_latent> at the end.
-                # TODO:W
                 base_prefix = seq[:-1].unsqueeze(0).clone()  # [1, L-1, d]
                 latent_block = seq[-1:].unsqueeze(0).clone()  # [1, 1, d] (starts with <start_latent>)
                 latent_state_hist = []
@@ -1686,7 +1639,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
                             raise NotImplementedError(
                                 f"mask_task_latent_implementation={self.mask_task_latent_implementation} is not implemented. If you don't want to mask task latents, set `mask_task_latent_steps=0`.")
                     latent_state_hist.append(latent_state)
-                    # TODO:W
                     if refine_bio_tokens and bio_positions:
                         batched_bio = base_prefix[:, bio_positions].to(dtype=self.model.dtype)
                         batched_lat = torch.cat(latent_state_hist, dim=1).to(dtype=self.model.dtype)
@@ -1787,7 +1739,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
             prompt_embeds, prompt_attn_mask = new_prompt_embeds, new_prompt_attn_mask
             self._last_task_latent_counts = task_latent_counts
-        # TODO:W
         elif refine_bio_tokens and (not (use_coconut and has_latent and attention_mask is not None)):
             # Special case: BioUpdater enabled but TaskThinker disabled -> do a single memory update once using the
             # last prompt-side token, without generating task-latents.
@@ -1827,7 +1778,6 @@ class Qwen3MoleculeLLM(PreTrainedModel):
 
         return prompt_embeds, prompt_attn_mask
 
-    # TODO:M
     @torch.no_grad()
     def generate(
         self,
@@ -1846,12 +1796,10 @@ class Qwen3MoleculeLLM(PreTrainedModel):
         2. 推理阶段自动改用左补齐 (Left Padding) 以确保生成质量。
         """
         # Backward compatible: allow passing List[str] (one SMILES per sample)
-        # TODO:M
         if smiles_list and isinstance(smiles_list[0], str):
             smiles_list = [[s] for s in smiles_list]  # type: ignore[list-item]
 
         # Reuse the shared embedding builder (and latent feedback) so vLLM can share the same code path.
-        # TODO:M
         prompt_embeds, prompt_attn_mask = self.get_prompt_embeddings(
             smiles_list=smiles_list,
             input_ids=input_ids,
@@ -1927,7 +1875,6 @@ def load_trained_components_stage3(model, lora_weights_path=None, mm_projector_p
         )
     
     # 2. 加载多模态组合权重 (Projector + Bio Updater)
-    # TODO:M
     if mm_projector_path:
         _ensure_exists(mm_projector_path, kind="Multi-modal checkpoint")
         _ensure_is_file(mm_projector_path, kind="Multi-modal checkpoint")

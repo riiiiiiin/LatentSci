@@ -10,7 +10,6 @@ class ModelConfig:
     # --- 数据对齐参数 (Alignment) ---
     # 分子前缀总长度 = num_queries + <mol_start> + <mol_end>
     # 默认 128 + 2 = 130
-    # TODO:M
     SMILES_LEN = NUM_QUERIES + 2 
     
     # --- 数据加载参数 (Data Loading) ---

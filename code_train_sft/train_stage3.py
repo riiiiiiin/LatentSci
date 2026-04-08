@@ -17,7 +17,6 @@ import wandb
 import plotext as plt
 
 # 导入我们的自定义组件
-# TODO:M
 from model_stage3 import Qwen3MoleculeLLM, load_trained_components_stage3
 from reflection_factory import get_domain_specific_func
 load_data = get_domain_specific_func("load_data")
@@ -120,7 +119,6 @@ class TerminalPlotCallback(TrainerCallback):
 class MultiModalDataCollator(DataCollatorForSeq2Seq):
     # ... (保持不变) ...
     def __call__(self, features):
-        # TODO:W
         smiles = [f.pop("sci_input") for f in features]
         cot_len = [f.pop("cot_len") for f in features] if features and ("cot_len" in features[0]) else None
         batch = super().__call__(features)
@@ -168,7 +166,6 @@ class MultiModalSFTTrainer(SFTTrainer):
         ce_loss_pos = _out_get(outputs_pos, "ce_loss", None)
         if ce_loss_pos is None:
             ce_loss_pos = loss_pos
-        # TODO:W
         bio_latent_active_pos = bool(_out_get(outputs_pos, "bio_latent_active", False))
         bio_latent_loss_pos = _out_get(outputs_pos, "bio_latent_loss", None)
         bio_latent_loss_scaled_pos = _out_get(outputs_pos, "bio_latent_loss_scaled", None)
@@ -188,7 +185,6 @@ class MultiModalSFTTrainer(SFTTrainer):
                 log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
 
                 if wandb.run is not None:
-                    # TODO:W
                     log_dict = {
                         "loss_pos": loss_pos.detach().float().item(),
                         "ce_loss_pos": ce_loss_pos.detach().float().item(),
@@ -206,7 +202,6 @@ class MultiModalSFTTrainer(SFTTrainer):
                     wandb.log(log_dict)
 
                 if log_every > 0 and (step % log_every == 0):
-                    # TODO:W
                     if getattr(self, "_last_subloss_print_step", None) != step:
                         self._last_subloss_print_step = step
                         msg = f"Step {step}: ce_loss={ce_loss_pos.detach().float().item():.4f}"
@@ -227,7 +222,6 @@ class MultiModalSFTTrainer(SFTTrainer):
         ce_loss_cf = _out_get(outputs_cf, "ce_loss", None)
         if ce_loss_cf is None:
             ce_loss_cf = loss_cf
-        # TODO:W
         bio_latent_active_cf = bool(_out_get(outputs_cf, "bio_latent_active", False))
         bio_latent_loss_cf = _out_get(outputs_cf, "bio_latent_loss", None)
         bio_latent_loss_scaled_cf = _out_get(outputs_cf, "bio_latent_loss_scaled", None)
@@ -245,7 +239,6 @@ class MultiModalSFTTrainer(SFTTrainer):
             log_every = int(getattr(getattr(self, "args", None), "logging_steps", 10) or 10)
 
             if wandb.run is not None:
-                # TODO:W
                 log_dict = {
                     "loss_pos": loss_pos.detach().float().item(),
                     "loss_cf": loss_cf.detach().float().item(),
@@ -276,7 +269,6 @@ class MultiModalSFTTrainer(SFTTrainer):
                     log_dict["task_latent_loss_scaled_cf"] = task_latent_loss_scaled_cf.detach().float().item()
                 wandb.log(log_dict)
 
-            # TODO:W
             if log_every > 0 and (step % log_every == 0):
                 if getattr(self, "_last_subloss_print_step", None) != step:
                     self._last_subloss_print_step = step
@@ -324,7 +316,6 @@ def train_stage3():
         default=False,
         help="Freeze the multi-modal projector module.",
     )
-    # TODO:M
     parser.add_argument(
         "--freeze_bio_updater",
         type=lambda x: (str(x).lower() == "true"),
@@ -374,7 +365,6 @@ def train_stage3():
         default=False,
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
     )
-    # TODO:M
     parser.add_argument(
         "--is_biothinker",
         type=lambda x: (str(x).lower() == "true"),
@@ -502,7 +492,6 @@ def train_stage3():
     current_lora_path = args.lora_path
     current_projector_path = args.projector_path
 
-    # TODO:M
     # 2. 开启训练循环
     # Stage 1 & 2 只训练一次，Stage 3 开启分阶段循环训练
     if args.training_stage == 1:
@@ -592,7 +581,6 @@ def train_stage3():
         logger.info("🚀" * 30 + "\n")
 
         # 2.1 每一个 Stage 彻底重新初始化模型
-        # TODO:M
         model = Qwen3MoleculeLLM(
             qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
             mol_config=mol_config,
@@ -651,7 +639,6 @@ def train_stage3():
             logger.info("freeze_llm=True: froze all LLM (base + LoRA) parameters.")
         
         # 确保投影器和 Bio Updater 可训练
-        # TODO:M
         for param in model.projector.parameters():
             param.requires_grad = not bool(args.freeze_projector)
         
@@ -768,7 +755,6 @@ def train_stage3():
         model.model.save_pretrained(current_lora_path)
         
         # 将 Projector / Bio Updater / Bio Thinker 存入同一个文件
-        # TODO:M
         mm_weights = {
             'projector': model.projector.state_dict(),
             'bio_updater': model.bio_updater.state_dict(),

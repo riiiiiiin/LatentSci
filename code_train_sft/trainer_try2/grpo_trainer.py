@@ -26,7 +26,6 @@ from trl.models import unwrap_model_for_generation
 from trl.trainer.grpo_trainer import GRPOTrainer as _TRL_GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
-# TODO:W
 def _normalize_smiles_batch(smiles_batch: list[Any] | None) -> list[list[str]] | None:
     if smiles_batch is None:
         return None
@@ -46,7 +45,6 @@ def _stable_hash01(text: str, seed: int, step: int) -> float:
     val = int.from_bytes(digest[:8], "little", signed=False)
     return val / float(2**64)
 
-# TODO:M
 class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
     """
     GRPOTrainer adapter for `model_stage3.Qwen3MoleculeLLM`.
@@ -129,7 +127,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         if getattr(self, "tools", None):
             raise NotImplementedError("Tools/tool-calling is not supported in this molecule GRPO trainer.")
 
-        # TODO:W
         self._current_smiles: list[list[str]] | None = None
         self._current_corrupt_task_latents: list[bool] | None = None
         self._current_task_latent_count: list[int] | None = None
@@ -152,7 +149,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
 
         vllm_mode = getattr(args, "vllm_mode", "colocate")
         if vllm_mode != "colocate":
-            # TODO:W
             raise NotImplementedError(
                 "This smiles-based vLLM integration only supports `vllm_mode='colocate'` because it relies on "
                 "prompt_embeds."
@@ -291,7 +287,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
     def _extract_smiles_from_inputs(self, inputs: list[dict[str, Any]]) -> list[list[str]]:
         if not inputs:
             return []
-        # TODO:M
         if "sci_input" in inputs[0]:
             smiles = [ex.get("sci_input") for ex in inputs]
         elif "smiles" in inputs[0]:
@@ -303,7 +298,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
             raise ValueError("Batch is missing `input_smiles` (or `smiles`) required by the molecule model.")
         return smiles_norm
 
-    # TODO:W
     def _generate_and_score_completions(self, inputs: list[dict[str, Any]]):
         self._current_smiles = self._extract_smiles_from_inputs(inputs)
         self._current_task_latent_count = None
@@ -366,7 +360,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         generate_inputs = _HFTrainer._prepare_inputs(self, generate_inputs)
         prompt_ids, prompt_mask = generate_inputs["input_ids"], generate_inputs["attention_mask"]
 
-        # TODO:W
         smiles = self._current_smiles
         if smiles is None or len(smiles) != prompt_ids.size(0):
             raise RuntimeError(
@@ -392,7 +385,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
 
             all_prompt_ids = prompt_ids
             all_prompt_mask = prompt_mask
-            # TODO:W
             all_smiles = smiles
             all_corrupt = self._current_corrupt_task_latents
             orig_size = len(prompts)
@@ -420,7 +412,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 torch.cuda.empty_cache()
                 self.llm.wake_up(level=1)
 
-            # TODO:M
             with torch.inference_mode():
                 prompt_embeds, prompt_attn = wrapper.get_prompt_embeddings(
                     smiles_list=all_smiles,
@@ -493,7 +484,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                     "for molecule-conditioned GRPO generation."
                 )
 
-            # TODO:M
             prompt_embeds, prompt_attn_mask = unwrapped_model.get_prompt_embeddings(
                 smiles_list=smiles,
                 input_ids=prompt_ids,
@@ -563,7 +553,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         token_type_ids=None,
         smiles: Optional[list[list[str]]] = None,
     ):
-        # TODO:W
         smiles_to_use = smiles if smiles is not None else self._current_smiles
         if smiles_to_use is None:
             return super()._get_per_token_logps_and_entropies(
@@ -601,7 +590,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
 
             corrupt_flags = self._current_corrupt_task_latents
             for start in range(0, input_ids.size(0), batch_size):
-                # TODO:W
                 end = start + batch_size
                 input_ids_batch = input_ids[start:end]
                 attention_mask_batch = attention_mask[start:end]
@@ -616,7 +604,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
                 if corrupt_flags is not None:
                     corrupt_batch = corrupt_flags[start:end]
 
-                # TODO:M
                 prompt_embeds, prompt_attn = model_to_check.get_prompt_embeddings(
                     smiles_list=smiles_batch,
                     input_ids=prompt_ids_batch,
@@ -718,7 +705,6 @@ class QwenMoleculeGRPOTrainer(_TRL_GRPOTrainer):
         # entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         # return logps, entropies
 
-    # TODO:M
     def _compute_loss(self, model, inputs):
         # Ensure the current batch's `smiles` is visible to `_get_per_token_logps_and_entropies` when the parent
         # implementation calls it (it doesn't thread `smiles` explicitly).

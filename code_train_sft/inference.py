@@ -75,7 +75,6 @@ def prepare_evaluation_dataset(
     for local_idx in range(len(dataset)):
         item = dataset[local_idx]
         # Keep the original smiles (not cleaned) as part of metadata
-        # TODO:W
         smiles_list = item.get("sci_input", [])
         sample_meta = {
             "sample_id": local_idx * num_procs + proc_index,
@@ -126,7 +125,6 @@ def run_inference_on_dataset(
         batch_indices = list(range(start_idx, end_idx))
         # Collect per-sample items
         input_tensors = []
-        # TODO:W
         smiles_batch = []
         raw_items = []
     
@@ -134,7 +132,6 @@ def run_inference_on_dataset(
         for idx in batch_indices:
             item = dataset[idx]
             raw_items.append(item)
-            # TODO:W
             smiles_list = item.get("sci_input", [])
             cleaned_smiles = [s.replace(".", "").strip() for s in smiles_list]
             smiles_batch.append(cleaned_smiles)
@@ -152,7 +149,6 @@ def run_inference_on_dataset(
         padded_attention_mask = padded_attention_mask.to(device).long()
         
         with torch.inference_mode():
-            # TODO:M
             generated_ids = model.generate(
                 smiles_list=smiles_batch,
                 input_ids=padded_input_ids,
@@ -272,7 +268,6 @@ def inference_stage3():
         default=False,
         help="Enable Bio-latent thinker tokens for stage 3 (ignored for stage 1/2).",
     )
-    # TODO:M
     parser.add_argument(
         "--is_biothinker",
         type=lambda x: (str(x).lower() == "true"),
@@ -304,7 +299,6 @@ def inference_stage3():
         default=False,
         help="Use TaskThinkerMulti (4-expert weighted MLP) instead of TaskThinker.",
     )
-    # TODO:M
     parser.add_argument(
         "--is_bioupdater",
         type=lambda x: (str(x).lower() == "true"),
@@ -359,7 +353,6 @@ def inference_stage3():
         default="noise",
         help="Implementation of task-latent masking during inference: 'mask', 'zero' or 'noise' (only effective when --mask_task_latent_steps > 0)."
     )
-    # TODO:M
     parser.add_argument(
         "--bio_latent_lambda",
         type=float,
@@ -410,7 +403,6 @@ def inference_stage3():
     shuffle_task_latents = bool(args.shuffle_task_latents) if mask_task_latent_steps == 0 else False
     mask_task_latent_implementation = str(args.mask_task_latent_implementation)
     
-    # TODO:M
     if args.training_stage == 1:
         stages = [0]
         is_coconut = False
@@ -483,7 +475,6 @@ def inference_stage3():
         logger.info("🚀" * 30 + "\n")
 
         # 2.1 初始化模型
-        # TODO:M
         model = Qwen3MoleculeLLM(
             qwen_model_name=ModelConfig.DEFAULT_QWEN_PATH,
             mol_config=mol_config,
@@ -524,7 +515,6 @@ def inference_stage3():
             raise ValueError("LoRA weights not found. Please ensure that the model has been trained with LoRA.")
         
         # 确保投影器和 Bio Updater 冻结
-        # TODO:M
         for param in model.projector.parameters():
             param.requires_grad = False
         

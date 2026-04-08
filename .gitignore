@@ -49,6 +49,7 @@ Thumbs.db
 materials/
 
 # Any Results
+**/*data/
 **/logs/
 **/results/
 **/records/
