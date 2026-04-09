@@ -291,7 +291,7 @@ logger = logging.getLogger(__name__)
 
 def train_stage3():
     parser = argparse.ArgumentParser(description="Stage 3 Training for Bio-LatentCOT")
-    parser.add_argument("--data_path", type=str, default="/mnt/afs/L202500070/Bio-LatentCOT/ChemCotDataset/chemcotbench-cot")
+    parser.add_argument("--data_path", type=str, default=ModelConfig.DEFAULT_DATA_PATH)
     parser.add_argument("--lora_path", type=str, default=None, help="Stage 2 LoRA weights (optional)")
     parser.add_argument("--projector_path", type=str, default=None, help="Unified projector + bio_updater weights (optional)")
     parser.add_argument("--output_dir", type=str, default="./outputs/stage3_coconut")

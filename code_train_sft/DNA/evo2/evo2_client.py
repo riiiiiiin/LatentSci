@@ -9,12 +9,12 @@ from shared_tensor import SharedTensorClient
 class Evo2Client:
     def __init__(self, folder, ckpt_name):
         self.client = SharedTensorClient()
-        if ckpt_name != 'evo2_1b_base':
+        if not 'evo2_1b_base' in ckpt_name:
             raise NotImplementedError(
                 f"Only evo2_1b_base is supported, found {ckpt_name}"
             )
         self.layer_name = 'blocks.20.mlp.l3'
-        self.client.call("load_evo2_model", ckpt_name, folder)
+        self.client.call("load_evo2_model", 'evo2_1b_base', f'{folder}/{ckpt_name}')
     
     def parameters(self):
         return []
@@ -48,5 +48,5 @@ class Evo2Client:
         
         return nested_embeddings
 
-def load_evo2(folder, ckpt_name):
-    return Evo2Client(folder, ckpt_name)
+def load_evo2(folder, ckpt_filename):
+    return Evo2Client(folder, ckpt_filename)

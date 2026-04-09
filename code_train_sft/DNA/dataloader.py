@@ -116,11 +116,7 @@ def tokenize_example_coconut(
     is_eval: bool = False,
 ):
     raise NotImplementedError("Coconut model has not been implemented")
-
-# TODO: add support for train/val split
-# TODO: original LatentChem has no val split, but both peft and trl supports val split
-# TODO: add a config that determines whether to enable val split
-# TODO: add registry support for splits
+    
 def load_data(
     path, 
     split='train',
@@ -140,6 +136,10 @@ def load_data(
         dataset = dataset.map(preprocess_example_text, batched=False)
         return dataset
     
+    columns_to_be_removed = ['question', 'answer', 'reasoning', 'reference_sequence', 'variant_sequence', 'query', 'input_smiles', 'label', 'cot']
+    if not eval_mode:
+        columns_to_be_removed += ['task', 'subtask', 'meta']
+
     dataset = dataset.map(
         preprocess_example,
         batched=False,
@@ -155,13 +155,15 @@ def load_data(
                 "c_thought": c_thought,
                 "max_len": max_len,
                 "is_eval": eval_mode
-            }
+            },
+            remove_columns=columns_to_be_removed
         )
     else:
         dataset = dataset.map(
             tokenize_example,
             batched=False,
-            fn_kwargs={"include_cot": include_cot, "max_len": max_len, "is_eval": eval_mode}
+            fn_kwargs={"include_cot": include_cot, "max_len": max_len, "is_eval": eval_mode},
+            remove_columns=columns_to_be_removed
         )
 
     return dataset
